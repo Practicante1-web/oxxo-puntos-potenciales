@@ -27,6 +27,7 @@ from utils import (
     UMBRAL_DUPLICIDAD_M,
     UMBRAL_SIMILITUD_NOMBRE,
     agrupar_generadores,
+    agrupar_puntos_por_radio,
     buscar_por_nombre,
     cargar_generadores_cache,
     cargar_puntos,
@@ -38,7 +39,8 @@ from utils import (
     leer_archivo_fuente,
     leer_desde_url,
     leer_generadores_desde_arcgis,
-    buscar_lugar,
+    buscar_coordenada_por_direccion,
+    parsear_coordenada_pegada,
 )
 
 METADATA_PATH = Path("data/metadata.json")
@@ -79,6 +81,132 @@ def url_mapa_embed(lat: float, lon: float, zoom: int = 17) -> str:
 def url_streetview_embed(lat: float, lon: float) -> str:
     """Google Street View (vista a nivel de calle) en el punto indicado. No necesita cuenta ni API key."""
     return f"https://maps.google.com/maps?layer=c&cbll={lat},{lon}&cbp=11,0,0,0,0&output=svembed"
+
+
+# ---------------------------------------------------------------------------
+# Mapa general combinado (Especialistas / Operación / Generadores)
+# ---------------------------------------------------------------------------
+# Colores por capa — los que pediste: morado para especialistas, azul claro
+# para operación. Generadores y el punto resaltado de una búsqueda usan
+# colores distintos para no confundirse con los anteriores.
+COLOR_OPERACION = [93, 173, 226]      # azul claro
+COLOR_GENERADOR = [230, 126, 34]      # naranja
+COLOR_RESALTADO = [225, 30, 30]       # rojo, para el punto que se acaba de buscar
+
+# Vista por defecto del mapa: siempre abre centrado en Bogotá (con radios
+# de punto más chicos) para que no se vea todo amontonado / gigante.
+BOGOTA_LAT = 4.6097
+BOGOTA_LON = -74.0817
+ZOOM_BOGOTA_DEFAULT = 10
+RADIO_PUNTO_MAPA = 18
+
+
+def _columna_tooltip_especialistas(d: pd.DataFrame) -> pd.Series:
+    comite = d["estado_comite"].replace("", "Pendiente de comité")
+    return (
+        "📍 " + d["local_identificado"].astype(str)
+        + "\nEspecialista: " + d["especialista"].astype(str)
+        + "\nPracticante: " + d["practicante"].astype(str)
+        + "\nComité: " + comite.astype(str)
+    )
+
+
+def _columna_tooltip_generadores(d: pd.DataFrame) -> pd.Series:
+    return (
+        "🏢 " + d["nombre_generador"].astype(str)
+        + "\nTipo: " + d["tipo_generador"].astype(str)
+        + "\nRegistros agrupados: " + d["cantidad_registros"].astype(str)
+        + "\nPuntos asociados: " + d["puntos_asociados"].astype(str)
+    )
+
+
+def renderizar_mapa_general(
+    capas_activas,
+    df_especialistas=None,
+    df_operacion=None,
+    df_generadores_agrupado=None,
+    punto_resaltado=None,
+):
+    """
+    Dibuja un solo mapa combinando las capas que estén activas:
+    "Especialistas (Excel)", "Operación (Survey)", "Generadores".
+    Si punto_resaltado=(lat, lon, etiqueta), agrega un marcador extra rojo
+    y centra el mapa ahí; si no, el mapa abre centrado en Bogotá.
+    """
+    capas = []
+
+    if "Especialistas (Excel)" in capas_activas:
+        if df_especialistas is not None and not df_especialistas.empty:
+            d = df_especialistas.dropna(subset=["latitud", "longitud"]).copy()
+            if not d.empty:
+                d["color"] = [COLOR_MORADO] * len(d)
+                d["tooltip_text"] = _columna_tooltip_especialistas(d)
+                capas.append(
+                    pdk.Layer(
+                        "ScatterplotLayer", data=d, get_position="[longitud, latitud]",
+                        get_fill_color="color", get_radius=RADIO_PUNTO_MAPA, pickable=True,
+                    )
+                )
+
+    if "Operación (Survey)" in capas_activas:
+        if df_operacion is not None and not df_operacion.empty:
+            d = df_operacion.dropna(subset=["latitud", "longitud"]).copy()
+            if not d.empty:
+                d["color"] = [COLOR_OPERACION] * len(d)
+                nombre_col = "local_identificado" if "local_identificado" in d.columns else (
+                    "nombre" if "nombre" in d.columns else None
+                )
+                d["tooltip_text"] = (
+                    "📍 " + d[nombre_col].astype(str) if nombre_col else "📍 Punto de operación"
+                )
+                capas.append(
+                    pdk.Layer(
+                        "ScatterplotLayer", data=d, get_position="[longitud, latitud]",
+                        get_fill_color="color", get_radius=RADIO_PUNTO_MAPA, pickable=True,
+                    )
+                )
+        else:
+            st.caption(
+                "🔧 Capa 'Operación (Survey)' todavía no está conectada — "
+                "falta el link de esa fuente."
+            )
+
+    if "Generadores" in capas_activas:
+        if df_generadores_agrupado is not None and not df_generadores_agrupado.empty:
+            d = df_generadores_agrupado.dropna(subset=["latitud", "longitud"]).copy()
+            if not d.empty:
+                d["color"] = [COLOR_GENERADOR] * len(d)
+                d["tooltip_text"] = _columna_tooltip_generadores(d)
+                capas.append(
+                    pdk.Layer(
+                        "ScatterplotLayer", data=d, get_position="[longitud, latitud]",
+                        get_fill_color="color", get_radius=RADIO_PUNTO_MAPA, pickable=True,
+                    )
+                )
+
+    if punto_resaltado is not None:
+        lat_h, lon_h, etiqueta_h = punto_resaltado
+        d = pd.DataFrame(
+            [{"latitud": lat_h, "longitud": lon_h, "tooltip_text": f"🔎 {etiqueta_h}"}]
+        )
+        d["color"] = [COLOR_RESALTADO] * len(d)
+        capas.append(
+            pdk.Layer(
+                "ScatterplotLayer", data=d, get_position="[longitud, latitud]",
+                get_fill_color="color", get_radius=RADIO_PUNTO_MAPA + 20, pickable=True,
+            )
+        )
+        vista = pdk.ViewState(latitude=lat_h, longitude=lon_h, zoom=15)
+    else:
+        vista = pdk.ViewState(latitude=BOGOTA_LAT, longitude=BOGOTA_LON, zoom=ZOOM_BOGOTA_DEFAULT)
+
+    if not capas:
+        st.info("No hay ninguna capa para mostrar con la selección actual.")
+        return
+
+    st.pydeck_chart(
+        pdk.Deck(layers=capas, initial_view_state=vista, tooltip={"text": "{tooltip_text}"})
+    )
 
 
 # Paleta de marca OXXO (rojo #E21C2A y naranja/amarillo #F0A929 son los
@@ -266,6 +394,12 @@ if "generadores" not in st.session_state:
 
 df_generadores = st.session_state.generadores
 
+# Vista agrupada de generadores (un renglón por generador único), calculada
+# una sola vez aquí y reutilizada tanto en el mapa combinado (pestaña 1)
+# como en la pestaña "Generadores".
+if "generadores_agrupados" not in st.session_state:
+    st.session_state["generadores_agrupados"] = agrupar_generadores(df_generadores)
+
 # ---------------------------------------------------------------------------
 # Encabezado — barra de marca estilo OXXO
 # ---------------------------------------------------------------------------
@@ -383,18 +517,17 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 # TAB 1 · Consulta y validación
 # ---------------------------------------------------------------------------
 with tab1:
-    st.subheader("Buscar y validar un punto potencial")
-    st.write(
-        "Antes de crear el punto en Survey123, revisa aquí si ya existe uno "
-        "igual o muy cercano."
-    )
+    st.markdown("## 🔎 BÚSQUEDA")
 
     modo_busqueda = st.radio(
         "¿Cómo quieres buscar?",
-        ["Por nombre", "Por coordenada"],
+        ["Por nombre", "Por dirección", "Por coordenada"],
         horizontal=True,
         key="modo_busqueda_tab1",
+        label_visibility="collapsed",
     )
+
+    consulta_punto = None  # se llena si el modo es "dirección" o "coordenada"
 
     if modo_busqueda == "Por nombre":
         nombre_busqueda = st.text_input(
@@ -416,112 +549,141 @@ with tab1:
                 )
                 st.dataframe(
                     resultado_nombre[
-                        ["id", "especialista", "ciudad", "local_identificado", "estado", "estado_comite", "similitud_nombre"]
+                        ["id", "especialista", "ciudad", "local_identificado", "estado_comite", "similitud_nombre"]
                     ],
                     use_container_width=True,
                     hide_index=True,
                 )
 
-    else:  # Por coordenada
-        busqueda_lugar = st.text_input(
-            "🔎 Busca una dirección o pega una coordenada (como en Google Maps)",
-            key="busqueda_lugar",
-            placeholder="Ej. Carrera 15 # 93-60, Bogotá  ó  4.6976142, -74.0922873",
+    elif modo_busqueda == "Por dirección":
+        direccion_busqueda = st.text_input(
+            "Escribe la dirección", key="direccion_busqueda_tab1",
+            placeholder="Ej. Carrera 15 # 93-60, Bogotá",
         )
-        if st.button("Buscar lugar", key="buscar_lugar_btn"):
-            with st.spinner("Buscando..."):
-                resultado_lugar = buscar_lugar(busqueda_lugar)
-            if resultado_lugar is None:
-                st.session_state["lugar_error"] = True
-                st.session_state.pop("lugar_encontrado", None)
+        if st.button("🔍 Buscar", type="primary", key="buscar_direccion_btn"):
+            with st.spinner("Buscando dirección..."):
+                resultado = buscar_coordenada_por_direccion(direccion_busqueda)
+            if resultado is None:
+                st.session_state["error_busqueda_punto"] = True
+                st.session_state.pop("resultado_busqueda_punto", None)
             else:
-                lat_encontrada, lon_encontrada, etiqueta_encontrada = resultado_lugar
-                st.session_state["lat_busqueda"] = lat_encontrada
-                st.session_state["lon_busqueda"] = lon_encontrada
-                st.session_state["lugar_encontrado"] = etiqueta_encontrada
-                st.session_state["lugar_error"] = False
-            st.rerun()
+                lat_e, lon_e, etiqueta_e = resultado
+                st.session_state["resultado_busqueda_punto"] = {
+                    "lat": lat_e, "lon": lon_e, "etiqueta": etiqueta_e,
+                }
+                st.session_state["error_busqueda_punto"] = False
 
-        if st.session_state.get("lugar_error"):
-            st.error(
-                "No se encontró eso. Si pegaste una coordenada, revisa que "
-                "tenga el formato 'latitud, longitud'; si es una dirección, "
-                "agrega la ciudad, o ingresa la coordenada manualmente abajo."
-            )
-        elif st.session_state.get("lugar_encontrado"):
-            st.caption(f"📍 {st.session_state['lugar_encontrado']}")
+        if st.session_state.get("error_busqueda_punto"):
+            st.error("No se encontró esa dirección. Intenta agregar la ciudad.")
+        consulta_punto = st.session_state.get("resultado_busqueda_punto")
 
-        c1, c2 = st.columns(2)
-        lat = c1.number_input(
-            "Latitud", value=4.6500000, format="%.7f", step=0.0000001, key="lat_busqueda"
-        )
-        lon = c2.number_input(
-            "Longitud", value=-74.0800000, format="%.7f", step=0.0000001, key="lon_busqueda"
+    else:  # Por coordenada
+        coord_pegada = st.text_input(
+            "Pega la coordenada completa (latitud, longitud)",
+            key="coord_pegada_tab1",
+            placeholder="Ej. 4.697539545568918, -74.09220071349365",
         )
         st.caption(
-            "Si vienes de copiar la coordenada de Google Maps o de ArcGIS, "
-            "pégala completa (con todos sus decimales) en el buscador de "
-            "arriba — así no se desplaza el punto."
+            "Pégala completa, con todos los decimales que traiga (de Google "
+            "Maps o de ArcGIS) — así el punto no se desplaza."
+        )
+        if st.button("🔍 Buscar", type="primary", key="buscar_coord_btn"):
+            coord = parsear_coordenada_pegada(coord_pegada)
+            if coord is None:
+                st.session_state["error_busqueda_punto"] = True
+                st.session_state.pop("resultado_busqueda_punto", None)
+            else:
+                lat_e, lon_e = coord
+                st.session_state["resultado_busqueda_punto"] = {
+                    "lat": lat_e, "lon": lon_e,
+                    "etiqueta": f"Coordenada {lat_e}, {lon_e}",
+                }
+                st.session_state["error_busqueda_punto"] = False
+
+        if st.session_state.get("error_busqueda_punto"):
+            st.error(
+                "Eso no tiene forma de coordenada. Debe verse así: "
+                "'4.697539545568918, -74.09220071349365'."
+            )
+        consulta_punto = st.session_state.get("resultado_busqueda_punto")
+
+    # ---- Resultado compartido para "Por dirección" y "Por coordenada" ----
+    if consulta_punto is not None:
+        lat_c, lon_c = consulta_punto["lat"], consulta_punto["lon"]
+        cercanos = detectar_coincidencias(df, lat_c, lon_c, "")
+
+        if not cercanos.empty:
+            st.warning(
+                f"⚠️ Posible duplicidad — se encontraron {len(cercanos)} punto(s) "
+                f"con ubicación cercana (< {UMBRAL_DUPLICIDAD_M} m).",
+                icon="⚠️",
+            )
+            for _, row in cercanos.iterrows():
+                with st.container(border=True):
+                    cc1, cc2 = st.columns([3, 1])
+                    detalle_distancia = (
+                        f"{row['distancia_m']:.0f} m de distancia"
+                        if row["distancia_m"] != float("inf")
+                        else "sin coordenadas para comparar distancia"
+                    )
+                    cc1.markdown(
+                        f"**{row['local_identificado']}** — {detalle_distancia}, "
+                        f"registrado por **{row['especialista']}**"
+                        + (f" · practicante **{row['practicante']}**" if row.get("practicante") else "")
+                    )
+                    cc1.caption(f"{row['ciudad']} · Fecha: {row['fecha_registro']}")
+                    cc2.markdown(f"Comité: **{row['estado_comite'] or 'Pendiente'}**")
+        else:
+            st.success(
+                "✅ No se encontraron oportunidades cercanas registradas en "
+                "esa ubicación.",
+                icon="✅",
+            )
+
+        st.write("**Vista de todos los puntos potenciales (tu búsqueda queda en rojo):**")
+        capas_tab1 = st.multiselect(
+            "Capas a mostrar",
+            ["Especialistas (Excel)", "Operación (Survey)", "Generadores"],
+            default=["Especialistas (Excel)", "Generadores"],
+            key="capas_mapa_tab1",
+        )
+        renderizar_mapa_general(
+            capas_tab1,
+            df_especialistas=df,
+            df_operacion=None,
+            df_generadores_agrupado=st.session_state.get("generadores_agrupados"),
+            punto_resaltado=(lat_c, lon_c, consulta_punto["etiqueta"]),
         )
 
-        if st.button("🔍 Buscar", type="primary", key="buscar_por_coord_btn"):
-            cercanos = detectar_coincidencias(df, lat, lon, "")
-            st.session_state["ultima_consulta_coord"] = {"lat": lat, "lon": lon, "cercanos": cercanos}
+        st.write("📍 **Vista de calle del lugar consultado:**")
+        col_mapa, col_calle = st.columns(2)
+        with col_mapa:
+            st.caption("Mapa")
+            components.iframe(url_mapa_embed(lat_c, lon_c), height=350)
+        with col_calle:
+            st.caption("Street View (vista a nivel de calle)")
+            components.iframe(url_streetview_embed(lat_c, lon_c), height=350)
+        st.caption(
+            "Si el punto está en una zona sin cobertura de Street View, "
+            "Google muestra ahí mismo un aviso de que no hay imagen "
+            "disponible."
+        )
 
-        consulta = st.session_state.get("ultima_consulta_coord")
-        if consulta is not None:
-            cercanos = consulta["cercanos"]
-
-            if not cercanos.empty:
-                st.warning(
-                    f"⚠️ Posible duplicidad — se encontraron {len(cercanos)} punto(s) "
-                    f"con ubicación cercana (< {UMBRAL_DUPLICIDAD_M} m).",
-                    icon="⚠️",
-                )
-                for _, row in cercanos.iterrows():
-                    with st.container(border=True):
-                        cc1, cc2 = st.columns([3, 1])
-                        detalle_distancia = (
-                            f"{row['distancia_m']:.0f} m de distancia"
-                            if row["distancia_m"] != float("inf")
-                            else "sin coordenadas para comparar distancia"
-                        )
-                        cc1.markdown(
-                            f"**{row['local_identificado']}** — {detalle_distancia}, "
-                            f"registrado por **{row['especialista']}**"
-                            + (f" · practicante **{row['practicante']}**" if row.get("practicante") else "")
-                        )
-                        cc1.caption(
-                            f"{row['ciudad']} · Fecha: {row['fecha_registro']}"
-                        )
-                        cc2.markdown(f"Estado: **{row['estado']}**")
-                        cc2.markdown(
-                            f"Comité: **{row['estado_comite'] or 'Pendiente'}**"
-                        )
-            else:
-                st.success(
-                    "✅ No se encontraron oportunidades cercanas registradas en "
-                    "esa ubicación.",
-                    icon="✅",
-                )
-
-            # Vista real del lugar: mapa de Google + Street View del punto consultado
-            st.write("📍 **Vista del lugar consultado:**")
-            col_mapa, col_calle = st.columns(2)
-            with col_mapa:
-                st.caption("Mapa")
-                components.iframe(
-                    url_mapa_embed(consulta["lat"], consulta["lon"]), height=350
-                )
-            with col_calle:
-                st.caption("Street View (vista a nivel de calle)")
-                components.iframe(
-                    url_streetview_embed(consulta["lat"], consulta["lon"]), height=350
-                )
-            st.caption(
-                "Si el punto está en una zona sin cobertura de Street View, "
-                "Google muestra ahí mismo un aviso de que no hay imagen "
-                "disponible."
+    st.divider()
+    with st.expander("📋 Ver posibles duplicados en todo el conjunto (radio de 300 m)"):
+        st.caption(
+            "Agrupa puntos con nombre parecido y a menos de 300 m entre sí — "
+            "el mismo radio con el que se recogen generadores."
+        )
+        duplicados_300 = agrupar_puntos_por_radio(df, umbral_m=300)
+        if duplicados_300.empty:
+            st.success("No se encontraron grupos de puntos duplicados dentro de 300 m.")
+        else:
+            st.warning(f"Se encontraron {len(duplicados_300)} grupo(s) con más de un punto:")
+            st.dataframe(
+                duplicados_300.drop(columns=["latitud", "longitud"]),
+                use_container_width=True,
+                hide_index=True,
             )
 
 # ---------------------------------------------------------------------------
@@ -680,13 +842,15 @@ with tab3:
             data=df_mapa_geo,
             get_position="[longitud, latitud]",
             get_fill_color="color",
-            get_radius=40,
+            get_radius=RADIO_PUNTO_MAPA,
             pickable=True,
         )
+        # Siempre abre centrado en Bogotá (no en el promedio de los puntos
+        # filtrados) para que la vista inicial no salga descuadrada.
         vista = pdk.ViewState(
-            latitude=df_mapa_geo["latitud"].mean(),
-            longitude=df_mapa_geo["longitud"].mean(),
-            zoom=10,
+            latitude=BOGOTA_LAT,
+            longitude=BOGOTA_LON,
+            zoom=ZOOM_BOGOTA_DEFAULT,
         )
         st.pydeck_chart(
             pdk.Deck(
@@ -696,7 +860,7 @@ with tab3:
                     "text": (
                         "{local_identificado}\nEspecialista: {especialista}\n"
                         "Practicante: {practicante}\nFecha: {fecha_registro}\n"
-                        "Estado: {estado}\nComité: {estado_comite_mostrar}"
+                        "Comité: {estado_comite_mostrar}"
                     )
                 },
             )
@@ -872,6 +1036,7 @@ with tab5:
             else:
                 st.session_state.generadores = nuevo_df_gen
                 guardar_generadores(nuevo_df_gen)
+                st.session_state.pop("generadores_agrupados", None)
                 st.rerun()
 
     if error_generadores:
