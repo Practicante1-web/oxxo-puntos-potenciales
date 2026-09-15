@@ -21,11 +21,8 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from utils import (
-    COLOR_ESTADO,
-    ESTADOS,
     UMBRAL_DUPLICIDAD_GENERADOR_M,
     UMBRAL_DUPLICIDAD_M,
-    UMBRAL_SIMILITUD_NOMBRE,
     agrupar_generadores,
     agrupar_puntos_por_radio,
     buscar_por_nombre,
@@ -205,8 +202,61 @@ def renderizar_mapa_general(
         return
 
     st.pydeck_chart(
-        pdk.Deck(layers=capas, initial_view_state=vista, tooltip={"text": "{tooltip_text}"})
+        pdk.Deck(
+            layers=capas,
+            initial_view_state=vista,
+            tooltip={"text": "{tooltip_text}"},
+            map_style="light",
+        )
     )
+
+
+def mostrar_leyenda_colores(incluir_generadores=True, incluir_operacion=True, incluir_resaltado=False):
+    """Cuadro de texto fijo explicando qué significa cada color de punto en los mapas."""
+    partes = ["🟣 **Morado** = Especialistas (Excel)"]
+    if incluir_operacion:
+        partes.append("🔵 **Azul claro** = Operación (Survey)")
+    if incluir_generadores:
+        partes.append("🟠 **Naranja** = Generadores")
+    if incluir_resaltado:
+        partes.append("🔴 **Rojo** = el punto que acabas de buscar")
+    st.caption(" &nbsp;·&nbsp; ".join(partes))
+
+
+COLOR_GENERADOR_UNICO = [230, 126, 34]     # naranja
+COLOR_GENERADOR_REPETIDO = [211, 47, 47]   # rojo
+
+
+def renderizar_mapa_generadores(df_generadores_agrupado, mostrar):
+    """
+    Mapa de generadores, con la opción de mostrar "Todos" o solo los
+    "Repetidos" (cantidad_registros > 1 — la señal de duplicidad).
+    """
+    d = df_generadores_agrupado.dropna(subset=["latitud", "longitud"]).copy()
+    if mostrar == "Solo repetidos":
+        d = d[d["cantidad_registros"] > 1]
+    if d.empty:
+        st.info("No hay generadores para mostrar con esa selección.")
+        return
+
+    d["color"] = d["cantidad_registros"].apply(
+        lambda n: COLOR_GENERADOR_REPETIDO if n > 1 else COLOR_GENERADOR_UNICO
+    )
+    d["tooltip_text"] = (
+        "🏢 " + d["nombre_generador"].astype(str)
+        + "\nTipo: " + d["tipo_generador"].astype(str)
+        + "\nRegistros agrupados: " + d["cantidad_registros"].astype(str)
+        + "\nPuntos potenciales asociados: " + d["puntos_asociados"].astype(str)
+    )
+    capa = pdk.Layer(
+        "ScatterplotLayer", data=d, get_position="[longitud, latitud]",
+        get_fill_color="color", get_radius=RADIO_PUNTO_MAPA, pickable=True,
+    )
+    vista = pdk.ViewState(latitude=BOGOTA_LAT, longitude=BOGOTA_LON, zoom=ZOOM_BOGOTA_DEFAULT)
+    st.pydeck_chart(
+        pdk.Deck(layers=[capa], initial_view_state=vista, tooltip={"text": "{tooltip_text}"}, map_style="light")
+    )
+    st.caption("🟠 **Naranja** = generador único &nbsp;·&nbsp; 🔴 **Rojo** = generador repetido (radio de 300 m)")
 
 
 # Paleta de marca OXXO (rojo #E21C2A y naranja/amarillo #F0A929 son los
@@ -443,7 +493,7 @@ _hay_fuente_url = bool(url_secreta) or (metadata.get("modo") == "url" and metada
 if _hay_fuente_url:
     col_espacio, col_refrescar = st.columns([5, 1.3])
     with col_refrescar:
-        if st.button("🔄 Actualizar desde OneDrive", use_container_width=True, type="primary"):
+        if st.button("🔄 Actualizar Excel de puente", use_container_width=True, type="primary"):
             _leer_desde_url_cacheado.clear()
             _url_para_refrescar = url_secreta or metadata.get("url_fuente", "")
             try:
@@ -480,7 +530,7 @@ elif cargado_desde_bundle:
     )
     st.caption(
         "Cada vez que se abre la app vuelve a leer este archivo desde cero. "
-        "Los cambios de estado que hagas en '📊 Seguimiento' se mantienen "
+        "Los cambios de estado que hagas en 'Estado de comité' se mantienen "
         "mientras tengas la app abierta, pero para que queden para siempre "
         "hay que actualizarlos también en el Excel del proyecto."
     )
@@ -503,21 +553,59 @@ if sin_coords:
         "aparecen en las tablas pero no en los mapas."
     )
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
+tab1, tab2 = st.tabs(
     [
-        "📍 Consulta y validación",
-        "📊 Seguimiento de oportunidades",
-        "🗺️ Mapa de oportunidades",
-        "⬆️ Actualizar datos",
+        "🔁 Duplicidad de puntos potenciales",
         "🏢 Generadores",
     ]
 )
 
 # ---------------------------------------------------------------------------
-# TAB 1 · Consulta y validación
+# MÓDULO 1 · Duplicidad de puntos potenciales
 # ---------------------------------------------------------------------------
 with tab1:
-    st.markdown("## 🔎 BÚSQUEDA")
+    st.subheader("Duplicidad de puntos potenciales")
+    st.write(
+        "Revisa qué puntos potenciales — de especialistas o de operación — "
+        "están repetidos: misma coordenada, o tan cerca (misma cuadra, "
+        "misma esquina) que probablemente son el mismo lugar."
+    )
+    mostrar_leyenda_colores(incluir_resaltado=True)
+
+    st.markdown("#### 🗺️ Mapa general")
+    capas_generales = st.multiselect(
+        "Capas a mostrar",
+        ["Especialistas (Excel)", "Operación (Survey)", "Generadores"],
+        default=["Especialistas (Excel)", "Generadores"],
+        key="capas_mapa_general",
+    )
+    renderizar_mapa_general(
+        capas_generales,
+        df_especialistas=df,
+        df_operacion=None,
+        df_generadores_agrupado=st.session_state.get("generadores_agrupados"),
+        punto_resaltado=None,
+    )
+
+    st.markdown("#### 📋 Posibles duplicados (radio de 300 m)")
+    st.caption(
+        "Agrupa puntos con nombre igual o parecido a menos de 300 m entre "
+        "sí — el mismo radio con el que se recogen generadores."
+    )
+    duplicados_300 = agrupar_puntos_por_radio(df, umbral_m=300)
+    if duplicados_300.empty:
+        st.success("No se encontraron grupos de puntos duplicados dentro de 300 m.")
+    else:
+        st.warning(f"Se encontraron {len(duplicados_300)} grupo(s) con más de un punto:")
+        st.dataframe(
+            duplicados_300.drop(columns=["latitud", "longitud"]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.divider()
+    st.markdown("#### 🔎 Revisar un punto específico")
+    st.write("Busca uno en particular para ver su ubicación exacta y si tiene algo cerca.")
 
     modo_busqueda = st.radio(
         "¿Cómo quieres buscar?",
@@ -612,6 +700,21 @@ with tab1:
         lat_c, lon_c = consulta_punto["lat"], consulta_punto["lon"]
         cercanos = detectar_coincidencias(df, lat_c, lon_c, "")
 
+        # 1) Primero Google Maps + Street View del punto consultado.
+        st.write("📍 **Vista de calle del lugar consultado:**")
+        col_mapa, col_calle = st.columns(2)
+        with col_mapa:
+            st.caption("Mapa")
+            components.iframe(url_mapa_embed(lat_c, lon_c), height=350)
+        with col_calle:
+            st.caption("Street View (vista a nivel de calle)")
+            components.iframe(url_streetview_embed(lat_c, lon_c), height=350)
+        st.caption(
+            "Si el punto está en una zona sin cobertura de Street View, "
+            "Google muestra ahí mismo un aviso de que no hay imagen "
+            "disponible."
+        )
+
         if not cercanos.empty:
             st.warning(
                 f"⚠️ Posible duplicidad — se encontraron {len(cercanos)} punto(s) "
@@ -640,7 +743,8 @@ with tab1:
                 icon="✅",
             )
 
-        st.write("**Vista de todos los puntos potenciales (tu búsqueda queda en rojo):**")
+        # 2) Después el mapa combinado (nuestro), centrado en el punto buscado.
+        st.write("**Ese punto en el mapa general (queda en rojo):**")
         capas_tab1 = st.multiselect(
             "Capas a mostrar",
             ["Especialistas (Excel)", "Operación (Survey)", "Generadores"],
@@ -655,57 +759,20 @@ with tab1:
             punto_resaltado=(lat_c, lon_c, consulta_punto["etiqueta"]),
         )
 
-        st.write("📍 **Vista de calle del lugar consultado:**")
-        col_mapa, col_calle = st.columns(2)
-        with col_mapa:
-            st.caption("Mapa")
-            components.iframe(url_mapa_embed(lat_c, lon_c), height=350)
-        with col_calle:
-            st.caption("Street View (vista a nivel de calle)")
-            components.iframe(url_streetview_embed(lat_c, lon_c), height=350)
-        st.caption(
-            "Si el punto está en una zona sin cobertura de Street View, "
-            "Google muestra ahí mismo un aviso de que no hay imagen "
-            "disponible."
-        )
-
     st.divider()
-    with st.expander("📋 Ver posibles duplicados en todo el conjunto (radio de 300 m)"):
-        st.caption(
-            "Agrupa puntos con nombre parecido y a menos de 300 m entre sí — "
-            "el mismo radio con el que se recogen generadores."
-        )
-        duplicados_300 = agrupar_puntos_por_radio(df, umbral_m=300)
-        if duplicados_300.empty:
-            st.success("No se encontraron grupos de puntos duplicados dentro de 300 m.")
-        else:
-            st.warning(f"Se encontraron {len(duplicados_300)} grupo(s) con más de un punto:")
-            st.dataframe(
-                duplicados_300.drop(columns=["latitud", "longitud"]),
-                use_container_width=True,
-                hide_index=True,
-            )
+    st.markdown("#### 📊 Estado de comité")
+    st.caption(
+        "Qué puntos fueron aprobados en comité, aprobados con tareas, con "
+        "tareas, o descartados — columna 'Estatus en bitácora' del Excel."
+    )
 
-# ---------------------------------------------------------------------------
-# TAB 2 · Seguimiento de oportunidades
-# ---------------------------------------------------------------------------
-with tab2:
-    st.subheader("Seguimiento de oportunidades")
-    st.write("Consulta qué ha ocurrido con cada punto después de entrar al proceso.")
-
-    f1, f2, f3, f4 = st.columns(4)
-    filtro_ciudad = f1.multiselect("Ciudad", sorted(df["ciudad"].dropna().unique()), default=[])
-    filtro_especialista = f2.multiselect(
+    fc1, fc2, fc3 = st.columns(3)
+    filtro_ciudad = fc1.multiselect("Ciudad", sorted(df["ciudad"].dropna().unique()), default=[])
+    filtro_especialista = fc2.multiselect(
         "Especialista", sorted(df["especialista"].dropna().unique()), default=[]
     )
-    filtro_estado = f3.multiselect("Estado", sorted(df["estado"].dropna().unique()), default=[])
-    fechas_validas = df["fecha_registro"].dropna()
-    rango_fechas = f4.date_input(
-        "Rango de fechas",
-        value=(fechas_validas.min(), fechas_validas.max()) if not fechas_validas.empty else None,
-    )
     opciones_comite_seg = sorted([v for v in df["estado_comite"].dropna().unique() if str(v).strip()])
-    filtro_comite = st.multiselect(
+    filtro_comite = fc3.multiselect(
         "Estado de comité", opciones_comite_seg, default=[],
         help="Deja vacío para ver todos, incluyendo los que aún no han pasado por comité.",
     )
@@ -715,49 +782,43 @@ with tab2:
         df_filtrado = df_filtrado[df_filtrado["ciudad"].isin(filtro_ciudad)]
     if filtro_especialista:
         df_filtrado = df_filtrado[df_filtrado["especialista"].isin(filtro_especialista)]
-    if filtro_estado:
-        df_filtrado = df_filtrado[df_filtrado["estado"].isin(filtro_estado)]
     if filtro_comite:
         df_filtrado = df_filtrado[df_filtrado["estado_comite"].isin(filtro_comite)]
-    if isinstance(rango_fechas, tuple) and len(rango_fechas) == 2:
-        ini, fin = rango_fechas
-        df_filtrado = df_filtrado[
-            df_filtrado["fecha_registro"].isna()
-            | ((df_filtrado["fecha_registro"] >= ini) & (df_filtrado["fecha_registro"] <= fin))
-        ]
 
-    metricas = st.columns(len(ESTADOS) + 1)
-    metricas[0].metric("Total filtrado", len(df_filtrado))
-    for col, estado in zip(metricas[1:], ESTADOS):
-        col.metric(estado, int((df_filtrado["estado"] == estado).sum()))
-
-    st.write("Actualiza el estado o las notas de una oportunidad:")
-    columnas_editor = [
-        "id", "especialista", "practicante", "ciudad", "upz", "local_identificado",
-        "fecha_registro", "estado", "estado_comite", "tiendas_evaluadas", "notas",
-    ]
-    edited = st.data_editor(
-        df_filtrado[columnas_editor],
-        column_config={
-            "estado": st.column_config.SelectboxColumn("estado", options=ESTADOS),
-        },
-        disabled=[c for c in columnas_editor if c not in ("estado", "notas")],
+    st.dataframe(
+        df_filtrado[
+            ["id", "especialista", "practicante", "ciudad", "local_identificado",
+             "fecha_registro", "estado_comite"]
+        ],
         use_container_width=True,
         hide_index=True,
-        key="editor_seguimiento",
     )
 
-    if st.button("💾 Guardar cambios de seguimiento", type="primary"):
-        df_actualizado = df.set_index("id")
-        edited_idx = edited.set_index("id")
-        df_actualizado.update(edited_idx)
-        st.session_state.puntos = df_actualizado.reset_index()
-        guardar_puntos(st.session_state.puntos)
-        st.success("Cambios guardados.")
-        st.rerun()
-
-    with st.expander("Ver detalle completo (incluye microsaturación)"):
-        st.dataframe(df_filtrado, use_container_width=True, hide_index=True)
+    with st.expander("✏️ Actualizar estado de comité o notas"):
+        columnas_editor = [
+            "id", "especialista", "practicante", "ciudad", "local_identificado",
+            "fecha_registro", "estado_comite", "notas",
+        ]
+        edited = st.data_editor(
+            df_filtrado[columnas_editor],
+            column_config={
+                "estado_comite": st.column_config.SelectboxColumn(
+                    "estado_comite", options=["", *opciones_comite_seg]
+                ),
+            },
+            disabled=[c for c in columnas_editor if c not in ("estado_comite", "notas")],
+            use_container_width=True,
+            hide_index=True,
+            key="editor_comite",
+        )
+        if st.button("💾 Guardar cambios", type="primary", key="guardar_comite"):
+            df_actualizado = df.set_index("id")
+            edited_idx = edited.set_index("id")
+            df_actualizado.update(edited_idx)
+            st.session_state.puntos = df_actualizado.reset_index()
+            guardar_puntos(st.session_state.puntos)
+            st.success("Cambios guardados.")
+            st.rerun()
 
     with st.expander("🗑️ Eliminar un punto (por ejemplo, uno de prueba)"):
         st.write(
@@ -783,240 +844,10 @@ with tab2:
                 st.rerun()
 
 # ---------------------------------------------------------------------------
-# TAB 3 · Mapa de oportunidades
+# MÓDULO 2 · Generadores
 # ---------------------------------------------------------------------------
-with tab3:
-    st.subheader("Mapa general de oportunidades")
-    st.write(
-        "Todos los puntos potenciales enviados por especialistas. Pasa el "
-        "mouse (o toca) un punto para ver quién lo trabajó, cuándo, y su "
-        "estado ante comité."
-    )
-
-    g1, g2, g3, g4 = st.columns(4)
-    filtro_ciudad_mapa = g1.multiselect(
-        "Ciudad", sorted(df["ciudad"].dropna().unique()), default=[], key="ciudad_mapa"
-    )
-    filtro_estado_mapa = g2.multiselect(
-        "Estado", sorted(df["estado"].dropna().unique()),
-        default=sorted(df["estado"].dropna().unique()), key="estado_mapa",
-    )
-    filtro_especialista_mapa = g3.multiselect(
-        "Especialista", sorted(df["especialista"].dropna().unique()), default=[], key="esp_mapa"
-    )
-    opciones_comite = sorted([v for v in df["estado_comite"].dropna().unique() if str(v).strip()])
-    filtro_comite_mapa = g4.multiselect(
-        "Estado de comité", opciones_comite, default=[], key="comite_mapa"
-    )
-
-    modo_color = st.radio(
-        "Color de los puntos",
-        ["🟣 Morado (por defecto)", "🎨 Por especialista"],
-        horizontal=True,
-        key="modo_color_mapa",
-    )
-
-    df_mapa = df[df["estado"].isin(filtro_estado_mapa)]
-    if filtro_ciudad_mapa:
-        df_mapa = df_mapa[df_mapa["ciudad"].isin(filtro_ciudad_mapa)]
-    if filtro_especialista_mapa:
-        df_mapa = df_mapa[df_mapa["especialista"].isin(filtro_especialista_mapa)]
-    if filtro_comite_mapa:
-        df_mapa = df_mapa[df_mapa["estado_comite"].isin(filtro_comite_mapa)]
-
-    df_mapa = df_mapa.copy()
-    if modo_color.startswith("🎨"):
-        df_mapa["color"] = df_mapa["especialista"].apply(color_por_especialista)
-    else:
-        df_mapa["color"] = [COLOR_MORADO] * len(df_mapa)
-
-    df_mapa["estado_comite_mostrar"] = df_mapa["estado_comite"].replace("", "Pendiente de comité")
-
-    df_mapa_geo = df_mapa.dropna(subset=["latitud", "longitud"])
-
-    if df_mapa_geo.empty:
-        st.info("No hay puntos con coordenadas que coincidan con los filtros seleccionados.")
-    else:
-        capa = pdk.Layer(
-            "ScatterplotLayer",
-            data=df_mapa_geo,
-            get_position="[longitud, latitud]",
-            get_fill_color="color",
-            get_radius=RADIO_PUNTO_MAPA,
-            pickable=True,
-        )
-        # Siempre abre centrado en Bogotá (no en el promedio de los puntos
-        # filtrados) para que la vista inicial no salga descuadrada.
-        vista = pdk.ViewState(
-            latitude=BOGOTA_LAT,
-            longitude=BOGOTA_LON,
-            zoom=ZOOM_BOGOTA_DEFAULT,
-        )
-        st.pydeck_chart(
-            pdk.Deck(
-                layers=[capa],
-                initial_view_state=vista,
-                tooltip={
-                    "text": (
-                        "{local_identificado}\nEspecialista: {especialista}\n"
-                        "Practicante: {practicante}\nFecha: {fecha_registro}\n"
-                        "Comité: {estado_comite_mostrar}"
-                    )
-                },
-            )
-        )
-        if modo_color.startswith("🎨"):
-            especialistas_en_mapa = sorted(df_mapa_geo["especialista"].dropna().unique())
-            st.caption(
-                "Cada especialista tiene un color fijo — pasa el mouse sobre "
-                "un punto para confirmar de quién es."
-            )
-        else:
-            st.caption("🟣 Todos los puntos en morado (cambia el color arriba si quieres verlos por especialista)")
-        faltantes_filtro = len(df_mapa) - len(df_mapa_geo)
-        if faltantes_filtro:
-            st.caption(f"({faltantes_filtro} punto(s) de este filtro no tienen coordenadas y no se muestran en el mapa)")
-
-    st.dataframe(
-        df_mapa.drop(columns=["color", "estado_comite_mostrar"]), use_container_width=True, hide_index=True
-    )
-
-# ---------------------------------------------------------------------------
-# TAB 4 · Actualizar datos
-# ---------------------------------------------------------------------------
-with tab4:
-    st.subheader("Actualizar datos desde el Excel del área")
-
-    st.markdown(
-        f"**Forma principal (recomendada):** reemplaza el archivo "
-        f"`{RUTA_EXCEL_BUNDLED}` directamente en el repositorio de GitHub "
-        "(mismo nombre, arrastrando el archivo nuevo como se explica en el "
-        "README) y súbelo con un commit. La próxima vez que se abra la app, "
-        "se carga sola y muestra el aviso verde de arriba con el conteo "
-        "actualizado — no hace falta tocar nada más."
-    )
-    st.caption(
-        "Las dos opciones de abajo son alternativas para casos puntuales: "
-        "probar un archivo distinto sin tocar GitHub, o conectar un link "
-        "de OneDrive que sea público."
-    )
-
-    modo = st.radio(
-        "¿Cómo quieres actualizar los datos ahora?",
-        ["📎 Subiendo el archivo yo misma (manual)", "🔗 Conectada en vivo a un link de OneDrive"],
-        index=0 if metadata.get("modo", "archivo") != "url" else 1,
-        horizontal=False,
-    )
-
-    st.divider()
-
-    if modo.startswith("📎"):
-        st.write(
-            "Sube aquí el archivo más reciente (el mismo formato del Excel/CSV "
-            "de *Revisión Microsaturaciones*, descargado directamente de "
-            "OneDrive) para refrescar la información de la app."
-        )
-        st.warning(
-            "⚠️ Subir un archivo **reemplaza por completo** la base de datos "
-            "actual de la app por la del archivo nuevo (no se combinan). "
-            "Asegúrate de subir la versión más actualizada y completa.",
-            icon="⚠️",
-        )
-
-        archivo = st.file_uploader("Archivo Excel (.xlsx) o CSV (.csv)", type=["xlsx", "csv"])
-
-        if archivo is not None:
-            try:
-                nuevo_df = leer_archivo_fuente(archivo, archivo.name)
-            except Exception as e:
-                st.error(f"No se pudo leer el archivo: {e}")
-            else:
-                st.success(f"Archivo leído correctamente: {len(nuevo_df)} puntos encontrados.")
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Puntos totales", len(nuevo_df))
-                c2.metric("Sin coordenadas", int(nuevo_df["latitud"].isna().sum()))
-                c3.metric("Ciudades distintas", nuevo_df["ciudad"].nunique())
-                st.write("Vista previa:")
-                st.dataframe(nuevo_df.head(15), use_container_width=True, hide_index=True)
-
-                if st.button("✅ Reemplazar datos de la app con este archivo", type="primary"):
-                    st.session_state.puntos = nuevo_df
-                    guardar_puntos(nuevo_df)
-                    guardar_metadata(modo="archivo", archivo_origen=archivo.name, url_fuente="")
-                    st.success("¡Datos actualizados! Recargando la app...")
-                    st.rerun()
-
-    else:
-        st.write(
-            "Pega aquí el link para compartir del archivo en OneDrive/SharePoint "
-            "(el mismo que usas para compartirlo por correo o Teams). Una vez "
-            "conectada, la app **no se refresca sola** — verás un botón "
-            "'🔄 Actualizar ahora' arriba en la parte superior para traer los "
-            "datos más recientes cuando tú lo necesites."
-        )
-        st.warning(
-            "⚠️ Esto **solo funciona si el link está compartido como "
-            "'Cualquier persona con el vínculo'** (acceso público, sin iniciar "
-            "sesión). Si está restringido a 'Personas de OXXO', la descarga "
-            "automática fallará — eso lo define el permiso en OneDrive, no "
-            "algo que se pueda arreglar desde el código. Revisa el botón "
-            "'Compartir' del archivo para confirmar qué permiso tiene.",
-            icon="⚠️",
-        )
-
-        url_actual = metadata.get("url_fuente", "")
-        url_input = st.text_input(
-            "Link para compartir de OneDrive/SharePoint",
-            value=url_actual,
-            placeholder="https://...sharepoint.com/:x:/g/personal/.../....?e=...",
-        )
-
-        if st.button("🔄 Probar conexión"):
-            if not url_input.strip():
-                st.error("Pega primero el link del archivo.")
-            else:
-                with st.spinner("Probando la descarga..."):
-                    try:
-                        _leer_desde_url_cacheado.clear()
-                        nuevo_df = _leer_desde_url_cacheado(url_input.strip())
-                    except Exception as e:
-                        st.error(f"No se pudo conectar: {e}")
-                    else:
-                        st.session_state["preview_url_df"] = nuevo_df
-                        st.session_state["preview_url_valor"] = url_input.strip()
-                        st.success(
-                            f"¡Conexión exitosa! Se descargaron {len(nuevo_df)} puntos."
-                        )
-
-        preview_df = st.session_state.get("preview_url_df")
-        if preview_df is not None:
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Puntos totales", len(preview_df))
-            c2.metric("Sin coordenadas", int(preview_df["latitud"].isna().sum()))
-            c3.metric("Ciudades distintas", preview_df["ciudad"].nunique())
-            st.write("Vista previa:")
-            st.dataframe(preview_df.head(15), use_container_width=True, hide_index=True)
-
-            if st.button("✅ Activar esta conexión en vivo", type="primary"):
-                st.session_state.puntos = preview_df
-                guardar_puntos(preview_df)
-                guardar_metadata(
-                    modo="url",
-                    url_fuente=st.session_state["preview_url_valor"],
-                    archivo_origen="Link de OneDrive (en vivo)",
-                )
-                del st.session_state["preview_url_df"]
-                st.success(
-                    "¡Conectado! Usa el botón '🔄 Actualizar ahora' (arriba, junto "
-                    "al título) cuando quieras traer los datos más recientes."
-                )
-                st.rerun()
-
-# ---------------------------------------------------------------------------
-# TAB 5 · Generadores
-# ---------------------------------------------------------------------------
-with tab5:
-    st.subheader("Validación de generadores")
+with tab2:
+    st.subheader("Generadores")
     st.write(
         "Cuando el radio de recolección (300 m) de dos puntos potenciales "
         "distintos se superpone, el mismo generador físico (por ejemplo, "
@@ -1055,6 +886,34 @@ with tab5:
     else:
         st.caption(f"📡 Conectado en vivo a la capa de Survey123 · {len(df_generadores)} registros cargados")
 
+        generadores_agrupados = st.session_state.get("generadores_agrupados")
+        if generadores_agrupados is None or generadores_agrupados.empty:
+            generadores_agrupados = agrupar_generadores(df_generadores)
+
+        st.markdown("#### 🗺️ Mapa de generadores")
+        modo_mapa_gen = st.radio(
+            "¿Cuáles quieres ver?",
+            ["Todos", "Solo repetidos"],
+            horizontal=True,
+            key="modo_mapa_generadores",
+        )
+        renderizar_mapa_generadores(generadores_agrupados, modo_mapa_gen)
+
+        st.markdown("#### ⚠️ Alertas de duplicidad (radio de 300 m)")
+        alertas_gen = generadores_agrupados[generadores_agrupados["cantidad_registros"] > 1]
+        if alertas_gen.empty:
+            st.success("No hay generadores repetidos por ahora.")
+        else:
+            st.warning(f"{len(alertas_gen)} generador(es) parecen estar registrados más de una vez:")
+            st.dataframe(
+                alertas_gen[
+                    ["nombre_generador", "tipo_generador", "cantidad_registros", "puntos_asociados"]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        st.divider()
         st.markdown("#### Consultar antes de registrar un generador nuevo")
         with st.form("form_consulta_generador"):
             cg1, cg2, cg3 = st.columns(3)
@@ -1106,8 +965,7 @@ with tab5:
         st.caption(
             "Cada fila es un generador físico único (ya agrupado); la columna "
             "'puntos_asociados' muestra a cuántos puntos potenciales distintos "
-            "quedó vinculado — más de uno ahí es justamente lo que antes pasaba "
-            "desapercibido."
+            "quedó vinculado."
         )
 
         tipos_generador = sorted(
@@ -1115,21 +973,21 @@ with tab5:
         )
         filtro_tipo_gen = st.multiselect("Tipo de generador", tipos_generador, default=[])
 
-        generadores_agrupados = agrupar_generadores(df_generadores)
+        generadores_mostrar = generadores_agrupados
         if filtro_tipo_gen:
-            generadores_agrupados = generadores_agrupados[
-                generadores_agrupados["tipo_generador"].isin(filtro_tipo_gen)
+            generadores_mostrar = generadores_mostrar[
+                generadores_mostrar["tipo_generador"].isin(filtro_tipo_gen)
             ]
 
         c1g, c2g = st.columns(2)
-        c1g.metric("Generadores únicos", len(generadores_agrupados))
+        c1g.metric("Generadores únicos", len(generadores_mostrar))
         c2g.metric(
             "Vinculados a más de un punto",
-            int((generadores_agrupados["cantidad_registros"] > 1).sum()),
+            int((generadores_mostrar["cantidad_registros"] > 1).sum()),
         )
 
         st.dataframe(
-            generadores_agrupados[
+            generadores_mostrar[
                 ["nombre_generador", "tipo_generador", "cantidad_registros", "puntos_asociados"]
             ],
             use_container_width=True,
@@ -1138,7 +996,6 @@ with tab5:
 
 st.divider()
 st.caption(
-    "Conectado a los datos reales del área (actualizables desde la pestaña "
-    "'Actualizar datos'). La herramienta complementa el proceso actual; "
-    "no reemplaza el análisis ni el criterio humano."
+    "Conectado a los datos reales del área. La herramienta complementa el "
+    "proceso actual; no reemplaza el análisis ni el criterio humano."
 )
