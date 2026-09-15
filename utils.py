@@ -415,6 +415,51 @@ def buscar_por_nombre(
     return resultado.sort_values("similitud_nombre", ascending=False)
 
 
+def buscar_coordenada_por_direccion(direccion: str, timeout: int = 10):
+    """
+    Busca una dirección escrita (como en el buscador de Google Maps) y
+    devuelve (lat, lon, nombre_encontrado) del resultado más probable.
+
+    Usa el buscador gratuito de OpenStreetMap (Nominatim) — no necesita
+    API key ni cuenta de Google. Devuelve None si no encuentra nada o si
+    falla la conexión.
+    """
+    import requests
+
+    direccion = (direccion or "").strip()
+    if not direccion:
+        return None
+
+    try:
+        resp = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={
+                "q": direccion,
+                "format": "json",
+                "limit": 1,
+                "countrycodes": "co",
+            },
+            headers={"User-Agent": "oxxo-puntos-potenciales-app (practica-oxxo)"},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        resultados = resp.json()
+    except Exception:
+        return None
+
+    if not resultados:
+        return None
+
+    primero = resultados[0]
+    try:
+        lat = float(primero["lat"])
+        lon = float(primero["lon"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    return lat, lon, primero.get("display_name", direccion)
+
+
 def detectar_coincidencias(
     df: pd.DataFrame,
     lat: float,
