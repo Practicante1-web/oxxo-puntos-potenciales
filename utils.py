@@ -6,6 +6,7 @@ de puntos potenciales (Inteligencia de Expansión - OXXO).
 import difflib
 import io
 import math
+import re
 import unicodedata
 from datetime import datetime
 
@@ -458,6 +459,37 @@ def buscar_coordenada_por_direccion(direccion: str, timeout: int = 10):
         return None
 
     return lat, lon, primero.get("display_name", direccion)
+
+
+def parsear_coordenada_pegada(texto: str):
+    """
+    Si el texto que la persona pegó ya es una coordenada (ej. '4.697614,
+    -74.092287' o '4.697614 -74.092287', tal cual la copia Google Maps),
+    devuelve (lat, lon). Si no tiene esa forma, devuelve None.
+    """
+    texto = (texto or "").strip()
+    if not texto:
+        return None
+    patron = re.match(r"^\s*(-?\d+(?:\.\d+)?)\s*[,\s]\s*(-?\d+(?:\.\d+)?)\s*$", texto)
+    if not patron:
+        return None
+    lat, lon = float(patron.group(1)), float(patron.group(2))
+    if -90 <= lat <= 90 and -180 <= lon <= 180:
+        return lat, lon
+    return None
+
+
+def buscar_lugar(texto: str, timeout: int = 10):
+    """
+    Buscador único: acepta una coordenada pegada (como la copia Google
+    Maps) O una dirección escrita, igual que el buscador normal de Google
+    Maps. Devuelve (lat, lon, etiqueta) o None si no encontró nada.
+    """
+    como_coordenada = parsear_coordenada_pegada(texto)
+    if como_coordenada is not None:
+        lat, lon = como_coordenada
+        return lat, lon, f"Coordenada {lat:.6f}, {lon:.6f}"
+    return buscar_coordenada_por_direccion(texto, timeout=timeout)
 
 
 def detectar_coincidencias(
