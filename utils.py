@@ -492,6 +492,83 @@ def buscar_lugar(texto: str, timeout: int = 10):
     return buscar_coordenada_por_direccion(texto, timeout=timeout)
 
 
+def agrupar_puntos_por_radio(
+    df: pd.DataFrame,
+    umbral_m: float = 300,
+    umbral_similitud: float = UMBRAL_SIMILITUD_NOMBRE,
+) -> pd.DataFrame:
+    """
+    Agrupa los puntos potenciales (de cualquier fuente) que probablemente
+    sean la misma oportunidad física: nombre parecido y a menos de
+    umbral_m metros entre sí. Devuelve solo los grupos con más de un
+    punto (los que sí representan una posible duplicidad), con la lista
+    de ids/especialistas/practicantes involucrados.
+
+    Mismo patrón de agrupamiento voraz que agrupar_generadores.
+    """
+    columnas = [
+        "nombre_representativo", "cantidad_puntos", "ids",
+        "especialistas", "practicantes", "latitud", "longitud",
+    ]
+    con_coords = df.dropna(subset=["latitud", "longitud"]).copy()
+    if con_coords.empty:
+        return pd.DataFrame(columns=columnas)
+
+    grupos = []
+    for _, fila in con_coords.iterrows():
+        nombre = fila.get("local_identificado", "")
+        lat, lon = fila["latitud"], fila["longitud"]
+        grupo_encontrado = None
+        for grupo in grupos:
+            distancia = haversine_m(lat, lon, grupo["latitud"], grupo["longitud"])
+            similitud = similitud_nombre(nombre, grupo["nombre_representativo"])
+            if distancia <= umbral_m and similitud >= umbral_similitud:
+                grupo_encontrado = grupo
+                break
+
+        if grupo_encontrado is not None:
+            grupo_encontrado["ids"].append(fila.get("id", ""))
+            especialista = str(fila.get("especialista", "")).strip()
+            if especialista and especialista not in grupo_encontrado["especialistas"]:
+                grupo_encontrado["especialistas"].append(especialista)
+            practicante = str(fila.get("practicante", "")).strip()
+            if practicante and practicante not in grupo_encontrado["practicantes"]:
+                grupo_encontrado["practicantes"].append(practicante)
+        else:
+            especialista = str(fila.get("especialista", "")).strip()
+            practicante = str(fila.get("practicante", "")).strip()
+            grupos.append(
+                {
+                    "nombre_representativo": nombre,
+                    "latitud": lat,
+                    "longitud": lon,
+                    "ids": [fila.get("id", "")],
+                    "especialistas": [especialista] if especialista else [],
+                    "practicantes": [practicante] if practicante else [],
+                }
+            )
+
+    resultado = pd.DataFrame(
+        [
+            {
+                "nombre_representativo": g["nombre_representativo"],
+                "cantidad_puntos": len(g["ids"]),
+                "ids": ", ".join(str(i) for i in g["ids"]),
+                "especialistas": ", ".join(g["especialistas"]),
+                "practicantes": ", ".join(g["practicantes"]),
+                "latitud": g["latitud"],
+                "longitud": g["longitud"],
+            }
+            for g in grupos
+            if len(g["ids"]) > 1
+        ],
+        columns=columnas,
+    )
+    if resultado.empty:
+        return resultado
+    return resultado.sort_values("cantidad_puntos", ascending=False).reset_index(drop=True)
+
+
 def detectar_coincidencias(
     df: pd.DataFrame,
     lat: float,
