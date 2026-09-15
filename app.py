@@ -38,7 +38,6 @@ from utils import (
     leer_archivo_fuente,
     leer_desde_url,
     leer_generadores_desde_arcgis,
-    registrar_punto,
 )
 
 METADATA_PATH = Path("data/metadata.json")
@@ -382,25 +381,30 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 # TAB 1 · Consulta y validación
 # ---------------------------------------------------------------------------
 with tab1:
-    st.subheader("Registrar una nueva oportunidad")
+    st.subheader("Buscar y validar un punto potencial")
     st.write(
-        "Ingresa las coordenadas y el nombre del local identificado para "
-        "consultar si ya existe una oportunidad registrada cerca **o con el "
-        "mismo nombre**, antes de continuar."
+        "Antes de crear el punto en Survey123, revisa aquí si ya existe uno "
+        "igual o muy cercano."
     )
 
-    with st.expander("🔎 Buscar solo por nombre del local"):
-        st.caption(
-            "Útil cuando dos puntos potenciales podrían compartir nombre "
-            "(mismo centro comercial, misma referencia), aunque estén en "
-            "zonas distintas del mapa."
-        )
+    modo_busqueda = st.radio(
+        "¿Cómo quieres buscar?",
+        ["Por nombre", "Por coordenada"],
+        horizontal=True,
+        key="modo_busqueda_tab1",
+    )
+
+    if modo_busqueda == "Por nombre":
         nombre_busqueda = st.text_input(
             "Nombre del local a buscar", key="busqueda_nombre",
             placeholder="Ej. Toberin 168",
         )
-        if st.button("Buscar por nombre"):
+        if st.button("🔍 Buscar", type="primary", key="buscar_por_nombre_btn"):
             resultado_nombre = buscar_por_nombre(df, nombre_busqueda)
+            st.session_state["resultado_busqueda_nombre"] = resultado_nombre
+
+        resultado_nombre = st.session_state.get("resultado_busqueda_nombre")
+        if resultado_nombre is not None:
             if resultado_nombre.empty:
                 st.success("No hay ningún local registrado con un nombre igual o parecido.")
             else:
@@ -410,134 +414,76 @@ with tab1:
                 )
                 st.dataframe(
                     resultado_nombre[
-                        ["id", "especialista", "ciudad", "local_identificado", "estado", "similitud_nombre"]
+                        ["id", "especialista", "ciudad", "local_identificado", "estado", "estado_comite", "similitud_nombre"]
                     ],
                     use_container_width=True,
                     hide_index=True,
                 )
 
-    with st.form("form_consulta"):
-        c1, c2, c3 = st.columns(3)
-        especialista = c1.text_input("Especialista", placeholder="Ej. Laura Ávila")
-        ciudad = c2.text_input("Ciudad", placeholder="Ej. Bogotá")
-        upz = c3.text_input("UPZ / zona", placeholder="Ej. Chico Lago")
+    else:  # Por coordenada
+        c1, c2 = st.columns(2)
+        lat = c1.number_input("Latitud", value=4.650000, format="%.6f", key="lat_busqueda")
+        lon = c2.number_input("Longitud", value=-74.080000, format="%.6f", key="lon_busqueda")
 
-        c4, c5 = st.columns(2)
-        lat = c4.number_input("Latitud", value=4.650000, format="%.6f")
-        lon = c5.number_input("Longitud", value=-74.080000, format="%.6f")
+        if st.button("🔍 Buscar", type="primary", key="buscar_por_coord_btn"):
+            cercanos = detectar_coincidencias(df, lat, lon, "")
+            st.session_state["ultima_consulta_coord"] = {"lat": lat, "lon": lon, "cercanos": cercanos}
 
-        local_identificado = st.text_input(
-            "Nombre del punto potencial", placeholder="Ej. Toberin 168"
-        )
-        notas = st.text_area("Información adicional / notas del entorno", "")
+        consulta = st.session_state.get("ultima_consulta_coord")
+        if consulta is not None:
+            cercanos = consulta["cercanos"]
 
-        consultar = st.form_submit_button(
-            "🔍 Consultar aplicativo", use_container_width=True, type="primary"
-        )
-
-    if consultar:
-        cercanos = detectar_coincidencias(df, lat, lon, local_identificado)
-        st.session_state["ultima_consulta"] = {
-            "especialista": especialista,
-            "ciudad": ciudad,
-            "upz": upz,
-            "lat": lat,
-            "lon": lon,
-            "local_identificado": local_identificado,
-            "notas": notas,
-            "cercanos": cercanos,
-        }
-
-    consulta = st.session_state.get("ultima_consulta")
-    if consulta is not None:
-        cercanos = consulta["cercanos"]
-
-        if not cercanos.empty:
-            st.warning(
-                f"⚠️ Posible duplicidad — se encontraron {len(cercanos)} punto(s) "
-                f"con ubicación cercana (< {UMBRAL_DUPLICIDAD_M} m) o nombre "
-                "igual/similar al ingresado.",
-                icon="⚠️",
-            )
-            for _, row in cercanos.iterrows():
-                with st.container(border=True):
-                    cc1, cc2 = st.columns([3, 1])
-                    detalle_distancia = (
-                        f"{row['distancia_m']:.0f} m de distancia"
-                        if row["distancia_m"] != float("inf")
-                        else "sin coordenadas para comparar distancia"
-                    )
-                    detalle_nombre = (
-                        f" · {row['similitud_nombre']*100:.0f}% de parecido en el nombre"
-                        if row["similitud_nombre"] >= UMBRAL_SIMILITUD_NOMBRE
-                        else ""
-                    )
-                    cc1.markdown(
-                        f"**{row['coincide_por']}** — {detalle_distancia}{detalle_nombre}, "
-                        f"registrado por **{row['especialista']}**"
-                        + (f" · practicante **{row['practicante']}**" if row.get("practicante") else "")
-                    )
-                    cc1.caption(
-                        f"{row['local_identificado']} · {row['ciudad']} · "
-                        f"Fecha: {row['fecha_registro']}"
-                    )
-                    cc2.markdown(f"Estado: **{row['estado']}**")
-                    cc2.markdown(
-                        f"Comité: **{row['estado_comite'] or 'Pendiente'}**"
-                    )
-        else:
-            st.success(
-                "✅ No se encontraron oportunidades cercanas ni con nombre "
-                "similar registradas. Puedes continuar con el proceso.",
-                icon="✅",
-            )
-
-        # Vista real del lugar: mapa de Google + Street View del punto consultado
-        st.write("📍 **Vista del lugar consultado:**")
-        col_mapa, col_calle = st.columns(2)
-        with col_mapa:
-            st.caption("Mapa")
-            components.iframe(
-                url_mapa_embed(consulta["lat"], consulta["lon"]), height=350
-            )
-        with col_calle:
-            st.caption("Street View (vista a nivel de calle)")
-            components.iframe(
-                url_streetview_embed(consulta["lat"], consulta["lon"]), height=350
-            )
-        st.caption(
-            "Si el punto está en una zona sin cobertura de Street View, Google "
-            "muestra ahí mismo un aviso de que no hay imagen disponible."
-        )
-
-        st.divider()
-        st.write("El especialista decide si continúa con la oportunidad:")
-        b1, b2 = st.columns(2)
-        if b1.button(
-            "➡️ Continuar con la oportunidad (registrar)",
-            use_container_width=True,
-            type="primary",
-        ):
-            if not consulta["especialista"] or not consulta["local_identificado"]:
-                st.error("Completa especialista y nombre del punto antes de registrar.")
-            else:
-                st.session_state.puntos = registrar_punto(
-                    df,
-                    consulta["especialista"],
-                    consulta["lat"],
-                    consulta["lon"],
-                    consulta["local_identificado"],
-                    consulta["ciudad"],
-                    consulta["upz"],
-                    consulta["notas"],
+            if not cercanos.empty:
+                st.warning(
+                    f"⚠️ Posible duplicidad — se encontraron {len(cercanos)} punto(s) "
+                    f"con ubicación cercana (< {UMBRAL_DUPLICIDAD_M} m).",
+                    icon="⚠️",
                 )
-                guardar_puntos(st.session_state.puntos)
-                st.success("Punto potencial registrado con estado **Solicitado**.")
-                del st.session_state["ultima_consulta"]
-                st.rerun()
-        if b2.button("✋ Descartar (posible duplicidad confirmada)", use_container_width=True):
-            del st.session_state["ultima_consulta"]
-            st.rerun()
+                for _, row in cercanos.iterrows():
+                    with st.container(border=True):
+                        cc1, cc2 = st.columns([3, 1])
+                        detalle_distancia = (
+                            f"{row['distancia_m']:.0f} m de distancia"
+                            if row["distancia_m"] != float("inf")
+                            else "sin coordenadas para comparar distancia"
+                        )
+                        cc1.markdown(
+                            f"**{row['local_identificado']}** — {detalle_distancia}, "
+                            f"registrado por **{row['especialista']}**"
+                            + (f" · practicante **{row['practicante']}**" if row.get("practicante") else "")
+                        )
+                        cc1.caption(
+                            f"{row['ciudad']} · Fecha: {row['fecha_registro']}"
+                        )
+                        cc2.markdown(f"Estado: **{row['estado']}**")
+                        cc2.markdown(
+                            f"Comité: **{row['estado_comite'] or 'Pendiente'}**"
+                        )
+            else:
+                st.success(
+                    "✅ No se encontraron oportunidades cercanas registradas en "
+                    "esa ubicación.",
+                    icon="✅",
+                )
+
+            # Vista real del lugar: mapa de Google + Street View del punto consultado
+            st.write("📍 **Vista del lugar consultado:**")
+            col_mapa, col_calle = st.columns(2)
+            with col_mapa:
+                st.caption("Mapa")
+                components.iframe(
+                    url_mapa_embed(consulta["lat"], consulta["lon"]), height=350
+                )
+            with col_calle:
+                st.caption("Street View (vista a nivel de calle)")
+                components.iframe(
+                    url_streetview_embed(consulta["lat"], consulta["lon"]), height=350
+                )
+            st.caption(
+                "Si el punto está en una zona sin cobertura de Street View, "
+                "Google muestra ahí mismo un aviso de que no hay imagen "
+                "disponible."
+            )
 
 # ---------------------------------------------------------------------------
 # TAB 2 · Seguimiento de oportunidades
