@@ -749,3 +749,8 @@ def registrar_punto(
         "notas": notas,
     }
     return pd.concat([df, pd.DataFrame([nuevo])], ignore_index=True)
+
+
+def eliminar_punto(df: pd.DataFrame, id_punto: int) -> pd.DataFrame:
+    """Elimina el punto con ese id (por ejemplo, uno de prueba) y retorna el DataFrame resultante."""
+    return df[df["id"] != id_punto].reset_index(drop=True)
