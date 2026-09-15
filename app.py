@@ -22,19 +22,51 @@ import streamlit as st
 from utils import (
     COLOR_ESTADO,
     ESTADOS,
+    UMBRAL_DUPLICIDAD_GENERADOR_M,
     UMBRAL_DUPLICIDAD_M,
     UMBRAL_SIMILITUD_NOMBRE,
+    agrupar_generadores,
     buscar_por_nombre,
+    cargar_generadores_cache,
     cargar_puntos,
     detectar_coincidencias,
+    detectar_generadores_coincidentes,
+    guardar_generadores,
     guardar_puntos,
     leer_archivo_fuente,
     leer_desde_url,
+    leer_generadores_desde_arcgis,
     registrar_punto,
 )
 
 METADATA_PATH = Path("data/metadata.json")
 RUTA_EXCEL_BUNDLED = Path("data/Puntos_potenciales.xlsx")
+
+# Nombre de la clave en "Secrets" de Streamlit Cloud donde se guarda, de
+# forma privada (nunca visible en el código ni en GitHub), el link de
+# OneDrive del archivo "Puente" que actualiza todo el equipo. Si esta
+# clave no está configurada, la app sigue funcionando igual con el Excel
+# incluido en el proyecto (RUTA_EXCEL_BUNDLED) como hasta ahora.
+SECRET_KEY_URL_COMITE = "url_puente_comite"
+
+# Color morado por defecto para los puntos potenciales en los mapas
+# (mismo estilo que ya reconoce el área). El interruptor "Colorear por
+# especialista" lo reemplaza por una paleta distinta por persona.
+COLOR_MORADO = [124, 58, 168]
+_PALETA_ESPECIALISTAS = [
+    [124, 58, 168], [230, 126, 34], [39, 174, 96], [41, 128, 185],
+    [192, 57, 43], [22, 160, 133], [211, 84, 0], [142, 68, 173],
+    [44, 62, 80], [243, 156, 18], [26, 188, 156], [127, 140, 141],
+]
+
+
+def color_por_especialista(nombre: str):
+    """Color determinístico (siempre el mismo para el mismo nombre) tomado de una paleta fija."""
+    nombre = str(nombre or "").strip()
+    if not nombre:
+        return [150, 150, 150]
+    indice = sum(ord(c) for c in nombre) % len(_PALETA_ESPECIALISTAS)
+    return _PALETA_ESPECIALISTAS[indice]
 
 # Paleta de marca OXXO (rojo #E21C2A y naranja/amarillo #F0A929 son los
 # colores oficiales de la marca; los demás son neutros de apoyo).
@@ -146,15 +178,44 @@ def _leer_desde_url_cacheado(url: str):
     return leer_desde_url(url)
 
 
+@st.cache_data(show_spinner="Consultando la capa de generadores...")
+def _leer_generadores_cacheado():
+    """
+    Igual patrón que _leer_desde_url_cacheado: caché sin expiración por
+    tiempo, solo se refresca con el botón "Actualizar generadores".
+    """
+    return leer_generadores_desde_arcgis()
+
+
 # ---------------------------------------------------------------------------
 # Estado inicial
 # ---------------------------------------------------------------------------
 metadata = leer_metadata()
 error_fuente_url = None
 cargado_desde_bundle = False
+cargado_desde_secret = False
+
+# El link del archivo "Puente" del equipo vive de forma privada en los
+# Secrets de Streamlit Cloud (nunca en el código ni en GitHub). Si está
+# configurado, es la fuente de más prioridad — por encima incluso del
+# Excel incluido en el proyecto.
+url_secreta = ""
+try:
+    url_secreta = st.secrets.get(SECRET_KEY_URL_COMITE, "")
+except Exception:
+    url_secreta = ""
 
 if "puntos" not in st.session_state:
-    if metadata.get("modo") == "url" and metadata.get("url_fuente"):
+    if url_secreta:
+        try:
+            st.session_state.puntos = _leer_desde_url_cacheado(url_secreta)
+            cargado_desde_secret = True
+        except Exception as e:
+            # Si falla la descarga en vivo (p. ej. el link dejó de ser público),
+            # no se cae la app: se usa la última copia local guardada.
+            error_fuente_url = str(e)
+            st.session_state.puntos = cargar_puntos()
+    elif metadata.get("modo") == "url" and metadata.get("url_fuente"):
         try:
             st.session_state.puntos = _leer_desde_url_cacheado(metadata["url_fuente"])
         except Exception as e:
@@ -180,6 +241,17 @@ df = st.session_state.puntos
 
 if error_fuente_url:
     st.error(f"⚠️ {error_fuente_url} (se está mostrando la última copia guardada).", icon="⚠️")
+
+error_generadores = None
+if "generadores" not in st.session_state:
+    try:
+        st.session_state.generadores = _leer_generadores_cacheado()
+        guardar_generadores(st.session_state.generadores)
+    except Exception as e:
+        error_generadores = str(e)
+        st.session_state.generadores = cargar_generadores_cache()
+
+df_generadores = st.session_state.generadores
 
 # ---------------------------------------------------------------------------
 # Encabezado — barra de marca estilo OXXO
@@ -220,22 +292,41 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if metadata.get("modo") == "url" and metadata.get("url_fuente"):
+_hay_fuente_url = bool(url_secreta) or (metadata.get("modo") == "url" and metadata.get("url_fuente"))
+if _hay_fuente_url:
     col_espacio, col_refrescar = st.columns([5, 1.3])
     with col_refrescar:
-        if st.button("🔄 Actualizar ahora", use_container_width=True, type="primary"):
+        if st.button("🔄 Actualizar desde OneDrive", use_container_width=True, type="primary"):
             _leer_desde_url_cacheado.clear()
+            _url_para_refrescar = url_secreta or metadata.get("url_fuente", "")
             try:
-                nuevo_df = _leer_desde_url_cacheado(metadata["url_fuente"])
+                nuevo_df = _leer_desde_url_cacheado(_url_para_refrescar)
             except Exception as e:
                 st.error(f"No se pudo actualizar: {e}")
             else:
                 st.session_state.puntos = nuevo_df
                 guardar_puntos(nuevo_df)
-                guardar_metadata(modo="url", url_fuente=metadata["url_fuente"], archivo_origen="Link de OneDrive (en vivo)")
+                if not url_secreta:
+                    # Si la fuente viene del secret, no hace falta guardar el
+                    # link en metadata.json (ya vive de forma privada en
+                    # Streamlit); solo se guarda cuando viene del flujo manual
+                    # de la pestaña "Actualizar datos".
+                    guardar_metadata(modo="url", url_fuente=_url_para_refrescar, archivo_origen="Link de OneDrive (en vivo)")
+                else:
+                    guardar_metadata(archivo_origen="Puente del equipo (OneDrive, en vivo)")
                 st.rerun()
 
-if cargado_desde_bundle:
+if cargado_desde_secret:
+    st.success(
+        f"🔒 Conectado en vivo al archivo Puente del equipo · {len(df)} puntos potenciales",
+        icon="🔒",
+    )
+    st.caption(
+        "El link de OneDrive está guardado de forma privada (no aparece en "
+        "el código ni en GitHub). Dale clic a '🔄 Actualizar desde OneDrive' "
+        "arriba cuando quieras traer los cambios más recientes del equipo."
+    )
+elif cargado_desde_bundle:
     st.success(
         f"✅ {RUTA_EXCEL_BUNDLED.name} cargado automáticamente · {len(df)} puntos potenciales",
         icon="✅",
@@ -265,12 +356,13 @@ if sin_coords:
         "aparecen en las tablas pero no en los mapas."
     )
 
-tab1, tab2, tab3, tab4 = st.tabs(
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
     [
         "📍 Consulta y validación",
         "📊 Seguimiento de oportunidades",
         "🗺️ Mapa de oportunidades",
         "⬆️ Actualizar datos",
+        "🏢 Generadores",
     ]
 )
 
@@ -371,12 +463,16 @@ with tab1:
                     cc1.markdown(
                         f"**{row['coincide_por']}** — {detalle_distancia}{detalle_nombre}, "
                         f"registrado por **{row['especialista']}**"
+                        + (f" · practicante **{row['practicante']}**" if row.get("practicante") else "")
                     )
                     cc1.caption(
                         f"{row['local_identificado']} · {row['ciudad']} · "
                         f"Fecha: {row['fecha_registro']}"
                     )
                     cc2.markdown(f"Estado: **{row['estado']}**")
+                    cc2.markdown(
+                        f"Comité: **{row['estado_comite'] or 'Pendiente'}**"
+                    )
         else:
             st.success(
                 "✅ No se encontraron oportunidades cercanas ni con nombre "
@@ -475,6 +571,11 @@ with tab2:
         "Rango de fechas",
         value=(fechas_validas.min(), fechas_validas.max()) if not fechas_validas.empty else None,
     )
+    opciones_comite_seg = sorted([v for v in df["estado_comite"].dropna().unique() if str(v).strip()])
+    filtro_comite = st.multiselect(
+        "Estado de comité", opciones_comite_seg, default=[],
+        help="Deja vacío para ver todos, incluyendo los que aún no han pasado por comité.",
+    )
 
     df_filtrado = df.copy()
     if filtro_ciudad:
@@ -483,6 +584,8 @@ with tab2:
         df_filtrado = df_filtrado[df_filtrado["especialista"].isin(filtro_especialista)]
     if filtro_estado:
         df_filtrado = df_filtrado[df_filtrado["estado"].isin(filtro_estado)]
+    if filtro_comite:
+        df_filtrado = df_filtrado[df_filtrado["estado_comite"].isin(filtro_comite)]
     if isinstance(rango_fechas, tuple) and len(rango_fechas) == 2:
         ini, fin = rango_fechas
         df_filtrado = df_filtrado[
@@ -497,8 +600,8 @@ with tab2:
 
     st.write("Actualiza el estado o las notas de una oportunidad:")
     columnas_editor = [
-        "id", "especialista", "ciudad", "upz", "local_identificado",
-        "fecha_registro", "estado", "tiendas_evaluadas", "notas",
+        "id", "especialista", "practicante", "ciudad", "upz", "local_identificado",
+        "fecha_registro", "estado", "estado_comite", "tiendas_evaluadas", "notas",
     ]
     edited = st.data_editor(
         df_filtrado[columnas_editor],
@@ -528,9 +631,13 @@ with tab2:
 # ---------------------------------------------------------------------------
 with tab3:
     st.subheader("Mapa general de oportunidades")
-    st.write("Visualización general de los puntos potenciales registrados.")
+    st.write(
+        "Todos los puntos potenciales enviados por especialistas. Pasa el "
+        "mouse (o toca) un punto para ver quién lo trabajó, cuándo, y su "
+        "estado ante comité."
+    )
 
-    g1, g2, g3 = st.columns(3)
+    g1, g2, g3, g4 = st.columns(4)
     filtro_ciudad_mapa = g1.multiselect(
         "Ciudad", sorted(df["ciudad"].dropna().unique()), default=[], key="ciudad_mapa"
     )
@@ -541,18 +648,33 @@ with tab3:
     filtro_especialista_mapa = g3.multiselect(
         "Especialista", sorted(df["especialista"].dropna().unique()), default=[], key="esp_mapa"
     )
+    opciones_comite = sorted([v for v in df["estado_comite"].dropna().unique() if str(v).strip()])
+    filtro_comite_mapa = g4.multiselect(
+        "Estado de comité", opciones_comite, default=[], key="comite_mapa"
+    )
+
+    modo_color = st.radio(
+        "Color de los puntos",
+        ["🟣 Morado (por defecto)", "🎨 Por especialista"],
+        horizontal=True,
+        key="modo_color_mapa",
+    )
 
     df_mapa = df[df["estado"].isin(filtro_estado_mapa)]
     if filtro_ciudad_mapa:
         df_mapa = df_mapa[df_mapa["ciudad"].isin(filtro_ciudad_mapa)]
     if filtro_especialista_mapa:
         df_mapa = df_mapa[df_mapa["especialista"].isin(filtro_especialista_mapa)]
+    if filtro_comite_mapa:
+        df_mapa = df_mapa[df_mapa["estado_comite"].isin(filtro_comite_mapa)]
 
     df_mapa = df_mapa.copy()
-    df_mapa["color"] = df_mapa["estado"].map(COLOR_ESTADO)
-    df_mapa["color"] = df_mapa["color"].apply(
-        lambda x: x if isinstance(x, list) else COLOR_ESTADO["Sin estado"]
-    )
+    if modo_color.startswith("🎨"):
+        df_mapa["color"] = df_mapa["especialista"].apply(color_por_especialista)
+    else:
+        df_mapa["color"] = [COLOR_MORADO] * len(df_mapa)
+
+    df_mapa["estado_comite_mostrar"] = df_mapa["estado_comite"].replace("", "Pendiente de comité")
 
     df_mapa_geo = df_mapa.dropna(subset=["latitud", "longitud"])
 
@@ -576,16 +698,29 @@ with tab3:
             pdk.Deck(
                 layers=[capa],
                 initial_view_state=vista,
-                tooltip={"text": "{local_identificado}\nEspecialista: {especialista}\nEstado: {estado}"},
+                tooltip={
+                    "text": (
+                        "{local_identificado}\nEspecialista: {especialista}\n"
+                        "Practicante: {practicante}\nFecha: {fecha_registro}\n"
+                        "Estado: {estado}\nComité: {estado_comite_mostrar}"
+                    )
+                },
             )
         )
-        st.caption("🔵 Solicitado &nbsp;&nbsp; 🟠 Revisión &nbsp;&nbsp; 🟢 Entregado")
+        if modo_color.startswith("🎨"):
+            especialistas_en_mapa = sorted(df_mapa_geo["especialista"].dropna().unique())
+            st.caption(
+                "Cada especialista tiene un color fijo — pasa el mouse sobre "
+                "un punto para confirmar de quién es."
+            )
+        else:
+            st.caption("🟣 Todos los puntos en morado (cambia el color arriba si quieres verlos por especialista)")
         faltantes_filtro = len(df_mapa) - len(df_mapa_geo)
         if faltantes_filtro:
             st.caption(f"({faltantes_filtro} punto(s) de este filtro no tienen coordenadas y no se muestran en el mapa)")
 
     st.dataframe(
-        df_mapa.drop(columns=["color"]), use_container_width=True, hide_index=True
+        df_mapa.drop(columns=["color", "estado_comite_mostrar"]), use_container_width=True, hide_index=True
     )
 
 # ---------------------------------------------------------------------------
@@ -718,6 +853,129 @@ with tab4:
                     "al título) cuando quieras traer los datos más recientes."
                 )
                 st.rerun()
+
+# ---------------------------------------------------------------------------
+# TAB 5 · Generadores
+# ---------------------------------------------------------------------------
+with tab5:
+    st.subheader("Validación de generadores")
+    st.write(
+        "Cuando el radio de recolección (300 m) de dos puntos potenciales "
+        "distintos se superpone, el mismo generador físico (por ejemplo, "
+        "las oficinas de un banco) puede quedar registrado dos veces en "
+        "Survey123 — una por cada punto — sin que nadie lo note. Consulta "
+        "aquí antes de registrar uno nuevo en campo."
+    )
+
+    col_espacio_gen, col_refrescar_gen = st.columns([5, 1.6])
+    with col_refrescar_gen:
+        if st.button("🔄 Actualizar generadores", use_container_width=True, type="primary"):
+            _leer_generadores_cacheado.clear()
+            try:
+                nuevo_df_gen = _leer_generadores_cacheado()
+            except Exception as e:
+                st.error(f"No se pudo actualizar: {e}")
+            else:
+                st.session_state.generadores = nuevo_df_gen
+                guardar_generadores(nuevo_df_gen)
+                st.rerun()
+
+    if error_generadores:
+        st.error(
+            f"⚠️ No se pudo conectar con la capa de generadores en vivo "
+            f"({error_generadores}) — se está mostrando la última copia "
+            "guardada.",
+            icon="⚠️",
+        )
+
+    if df_generadores.empty:
+        st.info(
+            "Todavía no hay generadores cargados. Dale clic a "
+            "'🔄 Actualizar generadores' arriba para traerlos."
+        )
+    else:
+        st.caption(f"📡 Conectado en vivo a la capa de Survey123 · {len(df_generadores)} registros cargados")
+
+        st.markdown("#### Consultar antes de registrar un generador nuevo")
+        with st.form("form_consulta_generador"):
+            cg1, cg2, cg3 = st.columns(3)
+            nombre_gen = cg1.text_input("Nombre del generador", placeholder="Ej. Bancolombia")
+            lat_gen = cg2.number_input("Latitud", value=4.650000, format="%.6f", key="lat_gen")
+            lon_gen = cg3.number_input("Longitud", value=-74.080000, format="%.6f", key="lon_gen")
+            consultar_gen = st.form_submit_button(
+                "🔍 Consultar generador", use_container_width=True, type="primary"
+            )
+
+        if consultar_gen:
+            if not nombre_gen.strip():
+                st.error("Escribe el nombre del generador para poder consultar.")
+            else:
+                coincidencias_gen = detectar_generadores_coincidentes(
+                    df_generadores, nombre_gen, lat_gen, lon_gen
+                )
+                if coincidencias_gen.empty:
+                    st.success(
+                        "✅ No se encontró ningún generador igual o parecido "
+                        f"a menos de {UMBRAL_DUPLICIDAD_GENERADOR_M} m. Parece nuevo, "
+                        "puedes registrarlo en Survey123.",
+                        icon="✅",
+                    )
+                else:
+                    puntos_ya_vinculados = sorted(
+                        set(coincidencias_gen["nombre_punto_potencial"]) - {""}
+                    )
+                    st.warning(
+                        f"⚠️ Ya existe un generador igual o muy parecido, vinculado a: "
+                        f"**{', '.join(puntos_ya_vinculados) if puntos_ya_vinculados else 'otro punto'}**. "
+                        "Considera vincularlo al punto actual en Survey123 en vez de "
+                        "crear uno nuevo.",
+                        icon="⚠️",
+                    )
+                    st.dataframe(
+                        coincidencias_gen[
+                            [
+                                "nombre_generador", "nombre_punto_potencial", "tipo_generador",
+                                "distancia_m", "similitud_nombre", "localizador",
+                            ]
+                        ],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+        st.divider()
+        st.markdown("#### Generadores únicos registrados hasta hoy")
+        st.caption(
+            "Cada fila es un generador físico único (ya agrupado); la columna "
+            "'puntos_asociados' muestra a cuántos puntos potenciales distintos "
+            "quedó vinculado — más de uno ahí es justamente lo que antes pasaba "
+            "desapercibido."
+        )
+
+        tipos_generador = sorted(
+            [t for t in df_generadores["tipo_generador"].dropna().unique() if str(t).strip()]
+        )
+        filtro_tipo_gen = st.multiselect("Tipo de generador", tipos_generador, default=[])
+
+        generadores_agrupados = agrupar_generadores(df_generadores)
+        if filtro_tipo_gen:
+            generadores_agrupados = generadores_agrupados[
+                generadores_agrupados["tipo_generador"].isin(filtro_tipo_gen)
+            ]
+
+        c1g, c2g = st.columns(2)
+        c1g.metric("Generadores únicos", len(generadores_agrupados))
+        c2g.metric(
+            "Vinculados a más de un punto",
+            int((generadores_agrupados["cantidad_registros"] > 1).sum()),
+        )
+
+        st.dataframe(
+            generadores_agrupados[
+                ["nombre_generador", "tipo_generador", "cantidad_registros", "puntos_asociados"]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
 
 st.divider()
 st.caption(
