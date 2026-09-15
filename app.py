@@ -38,6 +38,7 @@ from utils import (
     leer_archivo_fuente,
     leer_desde_url,
     leer_generadores_desde_arcgis,
+    buscar_lugar,
 )
 
 METADATA_PATH = Path("data/metadata.json")
@@ -79,12 +80,6 @@ def url_streetview_embed(lat: float, lon: float) -> str:
     """Google Street View (vista a nivel de calle) en el punto indicado. No necesita cuenta ni API key."""
     return f"https://maps.google.com/maps?layer=c&cbll={lat},{lon}&cbp=11,0,0,0,0&output=svembed"
 
-
-# Mapa de Google interactivo y navegable, CON su buscador propio (la misma
-# lupa de siempre) — a diferencia de url_mapa_embed, este no está fijado a
-# un solo punto: se puede buscar una dirección o pegar una coordenada
-# directamente adentro del mapa, igual que en maps.google.com.
-URL_MAPA_INTERACTIVO = "https://maps.google.com/maps?ll=4.6097,-74.0817&z=11&output=embed"
 
 # Paleta de marca OXXO (rojo #E21C2A y naranja/amarillo #F0A929 son los
 # colores oficiales de la marca; los demás son neutros de apoyo).
@@ -428,22 +423,46 @@ with tab1:
                 )
 
     else:  # Por coordenada
-        st.write(
-            "Busca aquí la dirección o pega la coordenada, con la lupa 🔍 "
-            "de arriba a la izquierda del mapa — es el buscador normal de "
-            "Google Maps. Para ver la calle, arrastra el muñequito naranja "
-            "(Pegman) que está abajo a la derecha del mapa sobre el punto."
+        busqueda_lugar = st.text_input(
+            "🔎 Busca una dirección o pega una coordenada (como en Google Maps)",
+            key="busqueda_lugar",
+            placeholder="Ej. Carrera 15 # 93-60, Bogotá  ó  4.6976142, -74.0922873",
         )
-        components.iframe(URL_MAPA_INTERACTIVO, height=450)
-        st.caption(
-            "Cuando encuentres el lugar, haz clic derecho sobre el punto "
-            "exacto en el mapa — Google Maps te muestra la latitud y "
-            "longitud, para que las copies aquí abajo y revises duplicados:"
-        )
+        if st.button("Buscar lugar", key="buscar_lugar_btn"):
+            with st.spinner("Buscando..."):
+                resultado_lugar = buscar_lugar(busqueda_lugar)
+            if resultado_lugar is None:
+                st.session_state["lugar_error"] = True
+                st.session_state.pop("lugar_encontrado", None)
+            else:
+                lat_encontrada, lon_encontrada, etiqueta_encontrada = resultado_lugar
+                st.session_state["lat_busqueda"] = lat_encontrada
+                st.session_state["lon_busqueda"] = lon_encontrada
+                st.session_state["lugar_encontrado"] = etiqueta_encontrada
+                st.session_state["lugar_error"] = False
+            st.rerun()
+
+        if st.session_state.get("lugar_error"):
+            st.error(
+                "No se encontró eso. Si pegaste una coordenada, revisa que "
+                "tenga el formato 'latitud, longitud'; si es una dirección, "
+                "agrega la ciudad, o ingresa la coordenada manualmente abajo."
+            )
+        elif st.session_state.get("lugar_encontrado"):
+            st.caption(f"📍 {st.session_state['lugar_encontrado']}")
 
         c1, c2 = st.columns(2)
-        lat = c1.number_input("Latitud", value=4.650000, format="%.6f", key="lat_busqueda")
-        lon = c2.number_input("Longitud", value=-74.080000, format="%.6f", key="lon_busqueda")
+        lat = c1.number_input(
+            "Latitud", value=4.6500000, format="%.7f", step=0.0000001, key="lat_busqueda"
+        )
+        lon = c2.number_input(
+            "Longitud", value=-74.0800000, format="%.7f", step=0.0000001, key="lon_busqueda"
+        )
+        st.caption(
+            "Si vienes de copiar la coordenada de Google Maps o de ArcGIS, "
+            "pégala completa (con todos sus decimales) en el buscador de "
+            "arriba — así no se desplaza el punto."
+        )
 
         if st.button("🔍 Buscar", type="primary", key="buscar_por_coord_btn"):
             cercanos = detectar_coincidencias(df, lat, lon, "")
