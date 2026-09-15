@@ -41,13 +41,19 @@ COLUMNAS = [
     "local_identificado",
     "fecha_registro",
     "estado",
+    "estado_comite",
     "latitud",
     "longitud",
     "practicante",
     "tiendas_evaluadas",
     "detalle_microsaturacion",
+    "comentarios",
     "notas",
 ]
+
+# Valores reales que usa hoy el área en la columna "Estatus En Bitacora"
+# (el estado que le da el comité a cada punto potencial).
+ESTADOS_COMITE = ["Aprobado", "Aprobado con tareas", "Con tareas", "Descartado", "Pausado"]
 
 # Variantes de nombres de ciudad que aparecen escritas de forma distinta
 # en el Excel (sin tilde, minúsculas, etc.) y su forma "bonita".
@@ -256,12 +262,14 @@ _VARIANTES_COLUMNAS = {
     "upz": ["upz"],
     "nombre": ["nombre pp", "nombre"],
     "estado": ["estado"],
+    "estado_comite": ["estatus en bitacora", "estatus"],
     "latitud": ["latitud"],
     "longitud": ["longitud"],
     "practicante": ["practicante"],
     "tiendas_evaluadas": ["tiendas evaluadas"],
     "fecha_recepcion": ["fecha recepcion"],
     "ms": ["ms (si o no)", "ms"],
+    "comentarios": ["comentarios"],
 }
 
 # Campos sin los cuales no se puede armar un punto potencial.
@@ -332,6 +340,9 @@ def _normalizar_crudo(crudo: pd.DataFrame) -> pd.DataFrame:
     normalizado["estado"] = (
         columna("estado", real).fillna("Sin estado").astype(str).str.strip().replace("", "Sin estado")
     )
+    # Estado ante comité (columna "Estatus En Bitacora" en el archivo real).
+    # Vacío significa que el punto todavía no ha pasado por comité.
+    normalizado["estado_comite"] = columna("estado_comite", real).fillna("").astype(str).str.strip()
     normalizado["latitud"] = pd.to_numeric(columna("latitud", real), errors="coerce")
     normalizado["longitud"] = pd.to_numeric(columna("longitud", real), errors="coerce")
     normalizado["practicante"] = columna("practicante", real).fillna("").astype(str).str.strip()
@@ -349,6 +360,7 @@ def _normalizar_crudo(crudo: pd.DataFrame) -> pd.DataFrame:
             lambda v: f"Microsaturación: {v}" if v and v.strip().lower() not in ("no", "nan") else ""
         )
 
+    normalizado["comentarios"] = columna("comentarios", real).fillna("").astype(str).str.strip()
     normalizado["notas"] = ""
 
     # Red de seguridad adicional por si queda alguna fila realmente vacía.
@@ -452,6 +464,260 @@ def detectar_coincidencias(
 
 
 # ---------------------------------------------------------------------------
+# Generadores (Survey123 / ArcGIS Online) — evitar duplicidad de generadores
+# ---------------------------------------------------------------------------
+# Capa pública de resultados de la encuesta de generadores (Survey123).
+# Confirmada como accesible sin inicio de sesión.
+URL_GENERADORES = (
+    "https://services.arcgis.com/mcvxP1ZaVXPjA6pf/arcgis/rest/services/"
+    "survey123_b917f791dc994dc5a9d45c398c77ceb4_results/FeatureServer/0"
+)
+
+GENERADORES_CSV_PATH = "data/generadores_cache.csv"
+
+# Umbral (en metros) para considerar que dos registros de generador son en
+# realidad el mismo lugar físico, si además el nombre es parecido. Acordado
+# con el área: 300 m (el mismo radio con el que se recogen generadores
+# alrededor de un punto potencial).
+UMBRAL_DUPLICIDAD_GENERADOR_M = 300
+
+GENERADOR_COLUMNAS = [
+    "localizador",
+    "nombre_punto_potencial",
+    "nombre_generador",
+    "tipo_generador",
+    "tipo_generador_otro",
+    "empleados_habitantes",
+    "unidades_residenciales",
+    "trafico_peatonal",
+    "trafico_vehicular",
+    "comentarios",
+    "fecha_creacion",
+    "creador",
+    "latitud",
+    "longitud",
+]
+
+
+def leer_generadores_desde_arcgis(url: str = URL_GENERADORES, timeout: int = 20) -> pd.DataFrame:
+    """
+    Descarga en vivo los registros de la capa de generadores (Survey123 /
+    ArcGIS Online) vía su servicio REST público, y los normaliza al
+    esquema que usa la app.
+
+    Lanza ValueError con un mensaje claro si el servicio no responde, no
+    es accesible, o devuelve un error (por ejemplo si la capa dejó de ser
+    pública).
+    """
+    import requests
+
+    # El servicio limita cuántos registros devuelve por consulta (viene
+    # marcado con "exceededTransferLimit": true cuando hay más), así que
+    # hay que paginar con "resultOffset" hasta traerlos todos.
+    todas_las_features = []
+    offset = 0
+    while True:
+        try:
+            resp = requests.get(
+                f"{url}/query",
+                params={
+                    "where": "1=1",
+                    "outFields": "*",
+                    "outSR": 4326,
+                    "returnGeometry": "true",
+                    "resultOffset": offset,
+                    "f": "json",
+                },
+                timeout=timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            raise ValueError(f"No se pudo conectar con la capa de generadores: {e}") from e
+
+        try:
+            datos = resp.json()
+        except Exception as e:
+            raise ValueError(f"La capa de generadores no devolvió un JSON válido: {e}") from e
+
+        if "error" in datos:
+            mensaje = datos["error"].get("message", "error desconocido")
+            raise ValueError(
+                f"La capa de generadores devolvió un error ({mensaje}). Puede que "
+                "haya dejado de ser pública o que la URL haya cambiado."
+            )
+
+        pagina = datos.get("features", [])
+        todas_las_features.extend(pagina)
+
+        if not datos.get("exceededTransferLimit") or not pagina:
+            break
+        offset += len(pagina)
+
+    filas = []
+    for feat in todas_las_features:
+        attrs = feat.get("attributes", {})
+        geom = feat.get("geometry") or {}
+        filas.append(
+            {
+                "localizador": attrs.get("localizador") or "",
+                "nombre_punto_potencial": attrs.get("nombre_del_punto_potencial") or "",
+                "nombre_generador": attrs.get("nombre_del_generador") or "",
+                "tipo_generador": attrs.get("tipo_de_generador") or "",
+                "tipo_generador_otro": attrs.get("tipo_de_generador_other") or "",
+                "empleados_habitantes": attrs.get("cantidad_de_empleados_o_habitan"),
+                "unidades_residenciales": attrs.get("cantidad_de_unidades_residencia"),
+                "trafico_peatonal": attrs.get("tr_fico_peatonal_promedio_15_mi"),
+                "trafico_vehicular": attrs.get("tr_fico_vehicular_promedio_15_m"),
+                "comentarios": attrs.get("comentarios_de_la_ubicaci_n") or "",
+                "fecha_creacion": attrs.get("CreationDate"),
+                "creador": attrs.get("Creator") or "",
+                "latitud": geom.get("y"),
+                "longitud": geom.get("x"),
+            }
+        )
+
+    df = pd.DataFrame(filas, columns=GENERADOR_COLUMNAS)
+    if not df.empty:
+        df["fecha_creacion"] = pd.to_datetime(
+            df["fecha_creacion"], unit="ms", errors="coerce"
+        ).dt.date
+        df["latitud"] = pd.to_numeric(df["latitud"], errors="coerce")
+        df["longitud"] = pd.to_numeric(df["longitud"], errors="coerce")
+        df["nombre_generador"] = df["nombre_generador"].fillna("").astype(str).str.strip()
+        df["nombre_punto_potencial"] = (
+            df["nombre_punto_potencial"].fillna("").astype(str).str.strip()
+        )
+    return df
+
+
+def cargar_generadores_cache() -> pd.DataFrame:
+    """Última copia de generadores guardada localmente (respaldo si falla la conexión en vivo)."""
+    try:
+        df = pd.read_csv(GENERADORES_CSV_PATH)
+        df["fecha_creacion"] = pd.to_datetime(df["fecha_creacion"], errors="coerce").dt.date
+        return df
+    except FileNotFoundError:
+        return pd.DataFrame(columns=GENERADOR_COLUMNAS)
+
+
+def guardar_generadores(df: pd.DataFrame) -> None:
+    """Guarda una copia local de los generadores, como respaldo por si falla la conexión en vivo."""
+    df.to_csv(GENERADORES_CSV_PATH, index=False)
+
+
+def detectar_generadores_coincidentes(
+    df_generadores: pd.DataFrame,
+    nombre: str,
+    lat: float,
+    lon: float,
+    umbral_m: float = UMBRAL_DUPLICIDAD_GENERADOR_M,
+    umbral_similitud: float = UMBRAL_SIMILITUD_NOMBRE,
+) -> pd.DataFrame:
+    """
+    Busca, entre TODOS los registros de generadores (sin importar a qué
+    punto potencial estén asociados), aquellos que probablemente sean el
+    mismo lugar físico que el que se está por registrar: nombre parecido
+    Y a menos de `umbral_m` metros.
+
+    Útil para consultar antes de registrar un generador nuevo en
+    Survey123: si ya existe algo parecido cerca, conviene vincularlo al
+    punto actual en vez de crear un registro nuevo.
+    """
+    columnas_resultado = list(GENERADOR_COLUMNAS) + ["distancia_m", "similitud_nombre"]
+    if df_generadores.empty or not nombre or not nombre.strip():
+        return df_generadores.reindex(columns=columnas_resultado).iloc[0:0]
+
+    con_coords = df_generadores.dropna(subset=["latitud", "longitud"]).copy()
+    if con_coords.empty:
+        return df_generadores.reindex(columns=columnas_resultado).iloc[0:0]
+
+    con_coords["distancia_m"] = con_coords.apply(
+        lambda row: round(haversine_m(lat, lon, row["latitud"], row["longitud"]), 1), axis=1
+    )
+    con_coords["similitud_nombre"] = con_coords["nombre_generador"].apply(
+        lambda x: round(similitud_nombre(nombre, x), 2)
+    )
+
+    coincidencias = con_coords[
+        (con_coords["distancia_m"] <= umbral_m)
+        & (con_coords["similitud_nombre"] >= umbral_similitud)
+    ]
+    return coincidencias.sort_values("distancia_m")[columnas_resultado]
+
+
+def agrupar_generadores(
+    df_generadores: pd.DataFrame,
+    umbral_m: float = UMBRAL_DUPLICIDAD_GENERADOR_M,
+    umbral_similitud: float = UMBRAL_SIMILITUD_NOMBRE,
+) -> pd.DataFrame:
+    """
+    Agrupa los registros crudos de generadores que probablemente sean el
+    mismo lugar físico (nombre parecido + cercanos) en un solo renglón por
+    generador único, listando todos los puntos potenciales a los que
+    quedó vinculado.
+
+    Es un agrupamiento voraz (greedy): recorre los registros uno por uno
+    y los suma al primer grupo existente con el que calcen; si no calzan
+    con ninguno, abren un grupo nuevo. Con cientos de registros esto es
+    rápido y suficientemente preciso para el caso de uso (revisar
+    duplicidad), aunque no es un clustering óptimo.
+    """
+    columnas = [
+        "nombre_generador", "tipo_generador", "latitud", "longitud",
+        "cantidad_registros", "puntos_asociados",
+    ]
+    con_coords = df_generadores.dropna(subset=["latitud", "longitud"]).copy()
+    if con_coords.empty:
+        return pd.DataFrame(columns=columnas)
+
+    grupos = []  # cada grupo: dict con nombre, tipo, lat, lon, registros (list of rows)
+
+    for _, fila in con_coords.iterrows():
+        nombre = fila["nombre_generador"]
+        lat, lon = fila["latitud"], fila["longitud"]
+        grupo_encontrado = None
+        for grupo in grupos:
+            distancia = haversine_m(lat, lon, grupo["latitud"], grupo["longitud"])
+            similitud = similitud_nombre(nombre, grupo["nombre_generador"])
+            if distancia <= umbral_m and similitud >= umbral_similitud:
+                grupo_encontrado = grupo
+                break
+
+        if grupo_encontrado is not None:
+            grupo_encontrado["registros"].append(fila)
+            punto = str(fila.get("nombre_punto_potencial", "")).strip()
+            if punto and punto not in grupo_encontrado["puntos"]:
+                grupo_encontrado["puntos"].append(punto)
+        else:
+            punto = str(fila.get("nombre_punto_potencial", "")).strip()
+            grupos.append(
+                {
+                    "nombre_generador": nombre,
+                    "tipo_generador": fila.get("tipo_generador", ""),
+                    "latitud": lat,
+                    "longitud": lon,
+                    "registros": [fila],
+                    "puntos": [punto] if punto else [],
+                }
+            )
+
+    resultado = pd.DataFrame(
+        [
+            {
+                "nombre_generador": g["nombre_generador"],
+                "tipo_generador": g["tipo_generador"],
+                "latitud": g["latitud"],
+                "longitud": g["longitud"],
+                "cantidad_registros": len(g["registros"]),
+                "puntos_asociados": ", ".join(g["puntos"]) if g["puntos"] else "",
+            }
+            for g in grupos
+        ],
+        columns=columnas,
+    )
+    return resultado.sort_values("cantidad_registros", ascending=False).reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
 # Registro de nuevos puntos (desde el formulario de la app)
 # ---------------------------------------------------------------------------
 def registrar_punto(
@@ -473,11 +739,13 @@ def registrar_punto(
         "local_identificado": local_identificado,
         "fecha_registro": datetime.now().date(),
         "estado": "Solicitado",
+        "estado_comite": "",
         "latitud": lat,
         "longitud": lon,
         "practicante": "",
         "tiendas_evaluadas": 0,
         "detalle_microsaturacion": "",
+        "comentarios": "",
         "notas": notas,
     }
     return pd.concat([df, pd.DataFrame([nuevo])], ignore_index=True)
