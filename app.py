@@ -18,6 +18,7 @@ from pathlib import Path
 import pandas as pd
 import pydeck as pdk
 import streamlit as st
+import streamlit.components.v1 as components
 
 from utils import (
     COLOR_ESTADO,
@@ -31,6 +32,7 @@ from utils import (
     cargar_puntos,
     detectar_coincidencias,
     detectar_generadores_coincidentes,
+    eliminar_punto,
     guardar_generadores,
     guardar_puntos,
     leer_archivo_fuente,
@@ -67,6 +69,16 @@ def color_por_especialista(nombre: str):
         return [150, 150, 150]
     indice = sum(ord(c) for c in nombre) % len(_PALETA_ESPECIALISTAS)
     return _PALETA_ESPECIALISTAS[indice]
+
+
+def url_mapa_embed(lat: float, lon: float, zoom: int = 17) -> str:
+    """Google Maps normal (satelital/calles), centrado en el punto. No necesita cuenta ni API key."""
+    return f"https://maps.google.com/maps?q={lat},{lon}&z={zoom}&output=embed"
+
+
+def url_streetview_embed(lat: float, lon: float) -> str:
+    """Google Street View (vista a nivel de calle) en el punto indicado. No necesita cuenta ni API key."""
+    return f"https://maps.google.com/maps?layer=c&cbll={lat},{lon}&cbp=11,0,0,0,0&output=svembed"
 
 # Paleta de marca OXXO (rojo #E21C2A y naranja/amarillo #F0A929 son los
 # colores oficiales de la marca; los demás son neutros de apoyo).
@@ -480,48 +492,22 @@ with tab1:
                 icon="✅",
             )
 
-        # Mapa de contexto: punto consultado + puntos existentes cercanos (con coordenadas)
-        puntos_mapa = cercanos.dropna(subset=["latitud", "longitud"]).copy()
-        if not puntos_mapa.empty:
-            puntos_mapa["color"] = puntos_mapa["estado"].map(COLOR_ESTADO)
-            puntos_mapa["color"] = puntos_mapa["color"].apply(
-                lambda x: x if isinstance(x, list) else COLOR_ESTADO["Sin estado"]
+        # Vista real del lugar: mapa de Google + Street View del punto consultado
+        st.write("📍 **Vista del lugar consultado:**")
+        col_mapa, col_calle = st.columns(2)
+        with col_mapa:
+            st.caption("Mapa")
+            components.iframe(
+                url_mapa_embed(consulta["lat"], consulta["lon"]), height=350
             )
-            puntos_mapa["tipo"] = "Punto potencial existente"
-        nuevo_punto = pd.DataFrame(
-            [{"latitud": consulta["lat"], "longitud": consulta["lon"],
-              "tipo": "Ubicación consultada", "color": [0, 90, 220],
-              "local_identificado": consulta["local_identificado"], "estado": "-"}]
-        )
-        capas = []
-        if not puntos_mapa.empty:
-            capas.append(
-                pdk.Layer(
-                    "ScatterplotLayer",
-                    data=puntos_mapa,
-                    get_position="[longitud, latitud]",
-                    get_fill_color="color",
-                    get_radius=25,
-                    pickable=True,
-                )
+        with col_calle:
+            st.caption("Street View (vista a nivel de calle)")
+            components.iframe(
+                url_streetview_embed(consulta["lat"], consulta["lon"]), height=350
             )
-        capas.append(
-            pdk.Layer(
-                "ScatterplotLayer",
-                data=nuevo_punto,
-                get_position="[longitud, latitud]",
-                get_fill_color="color",
-                get_radius=35,
-                pickable=True,
-            )
-        )
-        vista = pdk.ViewState(latitude=consulta["lat"], longitude=consulta["lon"], zoom=15)
-        st.pydeck_chart(
-            pdk.Deck(
-                layers=capas,
-                initial_view_state=vista,
-                tooltip={"text": "{tipo}\n{local_identificado}\nEstado: {estado}"},
-            )
+        st.caption(
+            "Si el punto está en una zona sin cobertura de Street View, Google "
+            "muestra ahí mismo un aviso de que no hay imagen disponible."
         )
 
         st.divider()
@@ -625,6 +611,29 @@ with tab2:
 
     with st.expander("Ver detalle completo (incluye microsaturación)"):
         st.dataframe(df_filtrado, use_container_width=True, hide_index=True)
+
+    with st.expander("🗑️ Eliminar un punto (por ejemplo, uno de prueba)"):
+        st.write(
+            "Úsalo para borrar puntos que no deberían estar, como pruebas o "
+            "duplicados metidos por error. Esta acción no se puede deshacer."
+        )
+        if df.empty:
+            st.caption("No hay puntos registrados todavía.")
+        else:
+            opciones_borrar = {
+                f"#{row.id} · {row.local_identificado} · {row.especialista}": row.id
+                for row in df.itertuples()
+            }
+            etiqueta_elegida = st.selectbox(
+                "Elige el punto a eliminar", list(opciones_borrar.keys())
+            )
+            id_a_borrar = opciones_borrar[etiqueta_elegida]
+            confirmar = st.checkbox(f"Sí, quiero eliminar el punto #{id_a_borrar} definitivamente")
+            if st.button("🗑️ Eliminar este punto", disabled=not confirmar):
+                st.session_state.puntos = eliminar_punto(df, id_a_borrar)
+                guardar_puntos(st.session_state.puntos)
+                st.success(f"Punto #{id_a_borrar} eliminado.")
+                st.rerun()
 
 # ---------------------------------------------------------------------------
 # TAB 3 · Mapa de oportunidades
