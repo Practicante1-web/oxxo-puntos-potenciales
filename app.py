@@ -94,14 +94,19 @@ BOGOTA_LAT = 4.6097
 BOGOTA_LON = -74.0817
 ZOOM_BOGOTA_DEFAULT = 10
 
-# Los puntos se dibujan con radio fijo EN PIXELES (radius_units="pixels"),
-# no en metros. Con radio en metros, un punto de 18 m se ve del tamaño de
-# una manzana entera al acercar mucho el zoom (una "mancha" gigante que se
-# encima con las demás); en píxeles, el punto se ve siempre del mismo
-# tamaño razonable sin importar cuánto zoom se le haga, como un pin normal
-# de Google Maps.
-RADIO_PUNTO_MAPA_PX = 7
-RADIO_RESALTADO_PX = 11
+# Los puntos se dibujan con un tamaño FIJO EN PIXELES, no en metros — así
+# se ven siempre como un pin normal, sin importar cuánto zoom se le haga
+# (con radio en metros, un punto se puede ver del tamaño de una manzana
+# entera al acercar mucho el zoom). Para que esto quede garantizado sin
+# depender de una sola propiedad, se usan DOS mecanismos a la vez:
+#   1) radius_units="pixels" + get_radius chico.
+#   2) radius_min_pixels / radius_max_pixels, que ponen un tope duro al
+#      tamaño en pantalla pase lo que pase — esta es la red de seguridad
+#      real contra puntos "gigantes".
+RADIO_PUNTO_MAPA_PX = 4
+RADIO_PUNTO_MAPA_PX_MAX = 6
+RADIO_RESALTADO_PX = 6
+RADIO_RESALTADO_PX_MAX = 9
 
 
 def _columna_tooltip_especialistas(d: pd.DataFrame) -> pd.Series:
@@ -152,7 +157,9 @@ def renderizar_mapa_general(
                 capas.append(
                     pdk.Layer(
                         "ScatterplotLayer", data=d, get_position="[longitud, latitud]",
-                        get_fill_color="color", get_radius=RADIO_PUNTO_MAPA_PX, radius_units="pixels", pickable=True,
+                        get_fill_color="color", get_radius=RADIO_PUNTO_MAPA_PX, radius_units="pixels",
+                        radius_min_pixels=RADIO_PUNTO_MAPA_PX, radius_max_pixels=RADIO_PUNTO_MAPA_PX_MAX,
+                        pickable=True,
                     )
                 )
 
@@ -170,7 +177,9 @@ def renderizar_mapa_general(
                 capas.append(
                     pdk.Layer(
                         "ScatterplotLayer", data=d, get_position="[longitud, latitud]",
-                        get_fill_color="color", get_radius=RADIO_PUNTO_MAPA_PX, radius_units="pixels", pickable=True,
+                        get_fill_color="color", get_radius=RADIO_PUNTO_MAPA_PX, radius_units="pixels",
+                        radius_min_pixels=RADIO_PUNTO_MAPA_PX, radius_max_pixels=RADIO_PUNTO_MAPA_PX_MAX,
+                        pickable=True,
                     )
                 )
         else:
@@ -188,7 +197,9 @@ def renderizar_mapa_general(
                 capas.append(
                     pdk.Layer(
                         "ScatterplotLayer", data=d, get_position="[longitud, latitud]",
-                        get_fill_color="color", get_radius=RADIO_PUNTO_MAPA_PX, radius_units="pixels", pickable=True,
+                        get_fill_color="color", get_radius=RADIO_PUNTO_MAPA_PX, radius_units="pixels",
+                        radius_min_pixels=RADIO_PUNTO_MAPA_PX, radius_max_pixels=RADIO_PUNTO_MAPA_PX_MAX,
+                        pickable=True,
                     )
                 )
 
@@ -201,7 +212,9 @@ def renderizar_mapa_general(
         capas.append(
             pdk.Layer(
                 "ScatterplotLayer", data=d, get_position="[longitud, latitud]",
-                get_fill_color="color", get_radius=RADIO_RESALTADO_PX, radius_units="pixels", pickable=True,
+                get_fill_color="color", get_radius=RADIO_RESALTADO_PX, radius_units="pixels",
+                radius_min_pixels=RADIO_RESALTADO_PX, radius_max_pixels=RADIO_RESALTADO_PX_MAX,
+                pickable=True,
             )
         )
         vista = pdk.ViewState(latitude=lat_h, longitude=lon_h, zoom=15)
@@ -264,6 +277,7 @@ def renderizar_mapa_generadores(df_generadores_agrupado, mostrar, key="mapa_gene
     capa = pdk.Layer(
         "ScatterplotLayer", data=d, get_position="[longitud, latitud]",
         get_fill_color="color", get_radius=RADIO_PUNTO_MAPA_PX, radius_units="pixels",
+        radius_min_pixels=RADIO_PUNTO_MAPA_PX, radius_max_pixels=RADIO_PUNTO_MAPA_PX_MAX,
         pickable=True, auto_highlight=True,
     )
     vista = pdk.ViewState(latitude=BOGOTA_LAT, longitude=BOGOTA_LON, zoom=ZOOM_BOGOTA_DEFAULT)
