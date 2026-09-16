@@ -30,7 +30,6 @@ from utils import (
     cargar_puntos,
     detectar_coincidencias,
     detectar_generadores_coincidentes,
-    eliminar_punto,
     guardar_generadores,
     guardar_puntos,
     leer_archivo_fuente,
@@ -90,12 +89,19 @@ COLOR_OPERACION = [93, 173, 226]      # azul claro
 COLOR_GENERADOR = [230, 126, 34]      # naranja
 COLOR_RESALTADO = [225, 30, 30]       # rojo, para el punto que se acaba de buscar
 
-# Vista por defecto del mapa: siempre abre centrado en Bogotá (con radios
-# de punto más chicos) para que no se vea todo amontonado / gigante.
+# Vista por defecto del mapa: siempre abre centrado en Bogotá.
 BOGOTA_LAT = 4.6097
 BOGOTA_LON = -74.0817
 ZOOM_BOGOTA_DEFAULT = 10
-RADIO_PUNTO_MAPA = 18
+
+# Los puntos se dibujan con radio fijo EN PIXELES (radius_units="pixels"),
+# no en metros. Con radio en metros, un punto de 18 m se ve del tamaño de
+# una manzana entera al acercar mucho el zoom (una "mancha" gigante que se
+# encima con las demás); en píxeles, el punto se ve siempre del mismo
+# tamaño razonable sin importar cuánto zoom se le haga, como un pin normal
+# de Google Maps.
+RADIO_PUNTO_MAPA_PX = 7
+RADIO_RESALTADO_PX = 11
 
 
 def _columna_tooltip_especialistas(d: pd.DataFrame) -> pd.Series:
@@ -109,12 +115,17 @@ def _columna_tooltip_especialistas(d: pd.DataFrame) -> pd.Series:
 
 
 def _columna_tooltip_generadores(d: pd.DataFrame) -> pd.Series:
-    return (
+    texto = (
         "🏢 " + d["nombre_generador"].astype(str)
         + "\nTipo: " + d["tipo_generador"].astype(str)
         + "\nRegistros agrupados: " + d["cantidad_registros"].astype(str)
         + "\nPuntos asociados: " + d["puntos_asociados"].astype(str)
     )
+    if "especialistas_asociados" in d.columns:
+        texto = texto + "\nEspecialista(s): " + d["especialistas_asociados"].replace("", "—").astype(str)
+    if "upz_asociadas" in d.columns:
+        texto = texto + "\nUPZ: " + d["upz_asociadas"].replace("", "—").astype(str)
+    return texto
 
 
 def renderizar_mapa_general(
@@ -141,7 +152,7 @@ def renderizar_mapa_general(
                 capas.append(
                     pdk.Layer(
                         "ScatterplotLayer", data=d, get_position="[longitud, latitud]",
-                        get_fill_color="color", get_radius=RADIO_PUNTO_MAPA, pickable=True,
+                        get_fill_color="color", get_radius=RADIO_PUNTO_MAPA_PX, radius_units="pixels", pickable=True,
                     )
                 )
 
@@ -159,7 +170,7 @@ def renderizar_mapa_general(
                 capas.append(
                     pdk.Layer(
                         "ScatterplotLayer", data=d, get_position="[longitud, latitud]",
-                        get_fill_color="color", get_radius=RADIO_PUNTO_MAPA, pickable=True,
+                        get_fill_color="color", get_radius=RADIO_PUNTO_MAPA_PX, radius_units="pixels", pickable=True,
                     )
                 )
         else:
@@ -177,7 +188,7 @@ def renderizar_mapa_general(
                 capas.append(
                     pdk.Layer(
                         "ScatterplotLayer", data=d, get_position="[longitud, latitud]",
-                        get_fill_color="color", get_radius=RADIO_PUNTO_MAPA, pickable=True,
+                        get_fill_color="color", get_radius=RADIO_PUNTO_MAPA_PX, radius_units="pixels", pickable=True,
                     )
                 )
 
@@ -190,7 +201,7 @@ def renderizar_mapa_general(
         capas.append(
             pdk.Layer(
                 "ScatterplotLayer", data=d, get_position="[longitud, latitud]",
-                get_fill_color="color", get_radius=RADIO_PUNTO_MAPA + 20, pickable=True,
+                get_fill_color="color", get_radius=RADIO_RESALTADO_PX, radius_units="pixels", pickable=True,
             )
         )
         vista = pdk.ViewState(latitude=lat_h, longitude=lon_h, zoom=15)
@@ -224,17 +235,24 @@ def mostrar_leyenda_colores(incluir_generadores=True, incluir_operacion=True, in
 
 
 COLOR_GENERADOR_UNICO = [230, 126, 34]     # naranja
-COLOR_GENERADOR_REPETIDO = [211, 47, 47]   # rojo
+COLOR_GENERADOR_REPETIDO = [25, 85, 220]   # azul — antes era rojo, se veía casi
+                                            # igual al naranja al encimarse los puntos
 
 
-def renderizar_mapa_generadores(df_generadores_agrupado, mostrar):
+def renderizar_mapa_generadores(df_generadores_agrupado, mostrar, key="mapa_generadores"):
     """
     Mapa de generadores, con la opción de mostrar "Todos" o solo los
     "Repetidos" (cantidad_registros > 1 — la señal de duplicidad).
+
+    Si el clic directo sobre un punto es compatible con la versión de
+    Streamlit desplegada, al hacer clic en un generador se muestra su
+    Street View debajo del mapa. Si no es compatible (versión más
+    antigua), el mapa se sigue mostrando normal, solo sin esa función —
+    nunca se cae la app por esto.
     """
-    d = df_generadores_agrupado.dropna(subset=["latitud", "longitud"]).copy()
+    d = df_generadores_agrupado.dropna(subset=["latitud", "longitud"]).copy().reset_index(drop=True)
     if mostrar == "Solo repetidos":
-        d = d[d["cantidad_registros"] > 1]
+        d = d[d["cantidad_registros"] > 1].reset_index(drop=True)
     if d.empty:
         st.info("No hay generadores para mostrar con esa selección.")
         return
@@ -242,21 +260,39 @@ def renderizar_mapa_generadores(df_generadores_agrupado, mostrar):
     d["color"] = d["cantidad_registros"].apply(
         lambda n: COLOR_GENERADOR_REPETIDO if n > 1 else COLOR_GENERADOR_UNICO
     )
-    d["tooltip_text"] = (
-        "🏢 " + d["nombre_generador"].astype(str)
-        + "\nTipo: " + d["tipo_generador"].astype(str)
-        + "\nRegistros agrupados: " + d["cantidad_registros"].astype(str)
-        + "\nPuntos potenciales asociados: " + d["puntos_asociados"].astype(str)
-    )
+    d["tooltip_text"] = _columna_tooltip_generadores(d)
     capa = pdk.Layer(
         "ScatterplotLayer", data=d, get_position="[longitud, latitud]",
-        get_fill_color="color", get_radius=RADIO_PUNTO_MAPA, pickable=True,
+        get_fill_color="color", get_radius=RADIO_PUNTO_MAPA_PX, radius_units="pixels",
+        pickable=True, auto_highlight=True,
     )
     vista = pdk.ViewState(latitude=BOGOTA_LAT, longitude=BOGOTA_LON, zoom=ZOOM_BOGOTA_DEFAULT)
-    st.pydeck_chart(
-        pdk.Deck(layers=[capa], initial_view_state=vista, tooltip={"text": "{tooltip_text}"}, map_style="light")
+    deck = pdk.Deck(layers=[capa], initial_view_state=vista, tooltip={"text": "{tooltip_text}"}, map_style="light")
+
+    seleccionado = None
+    try:
+        evento = st.pydeck_chart(
+            deck, on_select="rerun", selection_mode="single-object", key=key,
+        )
+        objetos = evento.selection.get("objects", {}) if evento is not None else {}
+        filas_click = objetos.get(capa.id, []) if objetos else []
+        if filas_click:
+            seleccionado = filas_click[0]
+    except TypeError:
+        # Streamlit desplegado no soporta on_select en pydeck_chart todavía
+        # (versión más vieja) — se muestra el mapa igual, sin clic.
+        st.pydeck_chart(deck)
+
+    st.caption(
+        "🟠 **Naranja** = generador único &nbsp;·&nbsp; 🔵 **Azul** = generador "
+        "repetido (radio de 300 m). Dale clic a un punto para ver su Street View."
     )
-    st.caption("🟠 **Naranja** = generador único &nbsp;·&nbsp; 🔴 **Rojo** = generador repetido (radio de 300 m)")
+
+    if seleccionado is not None:
+        lat_sel, lon_sel = seleccionado.get("latitud"), seleccionado.get("longitud")
+        if lat_sel is not None and lon_sel is not None:
+            st.write(f"📍 **Street View de '{seleccionado.get('nombre_generador', '')}':**")
+            components.iframe(url_streetview_embed(lat_sel, lon_sel), height=350)
 
 
 # Paleta de marca OXXO (rojo #E21C2A y naranja/amarillo #F0A929 son los
@@ -444,11 +480,12 @@ if "generadores" not in st.session_state:
 
 df_generadores = st.session_state.generadores
 
-# Vista agrupada de generadores (un renglón por generador único), calculada
-# una sola vez aquí y reutilizada tanto en el mapa combinado (pestaña 1)
-# como en la pestaña "Generadores".
-if "generadores_agrupados" not in st.session_state:
-    st.session_state["generadores_agrupados"] = agrupar_generadores(df_generadores)
+# Vista agrupada de generadores (un renglón por generador único). Se
+# recalcula en cada carga de la página (es una operación rápida de pandas)
+# en vez de guardarse en session_state — así nunca queda "pegada" una
+# versión vieja o vacía si la primera carga de generadores falló antes de
+# que alguien le diera clic a "Actualizar".
+generadores_agrupados = agrupar_generadores(df_generadores, df_puntos=df)
 
 # ---------------------------------------------------------------------------
 # Encabezado — barra de marca estilo OXXO
@@ -490,27 +527,41 @@ st.markdown(
 )
 
 _hay_fuente_url = bool(url_secreta) or (metadata.get("modo") == "url" and metadata.get("url_fuente"))
+
+
+def _refrescar_puntos_desde_url() -> bool:
+    """
+    Vuelve a descargar el Excel de puente (desde el Secret privado, o desde
+    el link manual guardado) y reemplaza los puntos cargados. Se usa tanto
+    en el botón de arriba del todo como en el botón dentro del Módulo 1, así
+    que cuando lleguen puntos nuevos al Excel de puente, se pueden traer sin
+    importar en qué parte de la app esté Alisson.
+    """
+    _leer_desde_url_cacheado.clear()
+    _url_para_refrescar = url_secreta or metadata.get("url_fuente", "")
+    try:
+        nuevo_df = _leer_desde_url_cacheado(_url_para_refrescar)
+    except Exception as e:
+        st.error(f"No se pudo actualizar: {e}")
+        return False
+    st.session_state.puntos = nuevo_df
+    guardar_puntos(nuevo_df)
+    if not url_secreta:
+        # Si la fuente viene del secret, no hace falta guardar el link en
+        # metadata.json (ya vive de forma privada en Streamlit); solo se
+        # guarda cuando viene del flujo manual de la pestaña "Actualizar
+        # datos".
+        guardar_metadata(modo="url", url_fuente=_url_para_refrescar, archivo_origen="Link de OneDrive (en vivo)")
+    else:
+        guardar_metadata(archivo_origen="Puente del equipo (OneDrive, en vivo)")
+    return True
+
+
 if _hay_fuente_url:
     col_espacio, col_refrescar = st.columns([5, 1.3])
     with col_refrescar:
-        if st.button("🔄 Actualizar Excel de puente", use_container_width=True, type="primary"):
-            _leer_desde_url_cacheado.clear()
-            _url_para_refrescar = url_secreta or metadata.get("url_fuente", "")
-            try:
-                nuevo_df = _leer_desde_url_cacheado(_url_para_refrescar)
-            except Exception as e:
-                st.error(f"No se pudo actualizar: {e}")
-            else:
-                st.session_state.puntos = nuevo_df
-                guardar_puntos(nuevo_df)
-                if not url_secreta:
-                    # Si la fuente viene del secret, no hace falta guardar el
-                    # link en metadata.json (ya vive de forma privada en
-                    # Streamlit); solo se guarda cuando viene del flujo manual
-                    # de la pestaña "Actualizar datos".
-                    guardar_metadata(modo="url", url_fuente=_url_para_refrescar, archivo_origen="Link de OneDrive (en vivo)")
-                else:
-                    guardar_metadata(archivo_origen="Puente del equipo (OneDrive, en vivo)")
+        if st.button("🔄 Actualizar Excel de puente", use_container_width=True, type="primary", key="refrescar_puente_top"):
+            if _refrescar_puntos_desde_url():
                 st.rerun()
 
 if cargado_desde_secret:
@@ -572,40 +623,25 @@ with tab1:
     )
     mostrar_leyenda_colores(incluir_resaltado=True)
 
-    st.markdown("#### 🗺️ Mapa general")
-    capas_generales = st.multiselect(
-        "Capas a mostrar",
-        ["Especialistas (Excel)", "Operación (Survey)", "Generadores"],
-        default=["Especialistas (Excel)", "Generadores"],
-        key="capas_mapa_general",
-    )
-    renderizar_mapa_general(
-        capas_generales,
-        df_especialistas=df,
-        df_operacion=None,
-        df_generadores_agrupado=st.session_state.get("generadores_agrupados"),
-        punto_resaltado=None,
-    )
-
-    st.markdown("#### 📋 Posibles duplicados (radio de 300 m)")
-    st.caption(
-        "Agrupa puntos con nombre igual o parecido a menos de 300 m entre "
-        "sí — el mismo radio con el que se recogen generadores."
-    )
-    duplicados_300 = agrupar_puntos_por_radio(df, umbral_m=300)
-    if duplicados_300.empty:
-        st.success("No se encontraron grupos de puntos duplicados dentro de 300 m.")
-    else:
-        st.warning(f"Se encontraron {len(duplicados_300)} grupo(s) con más de un punto:")
-        st.dataframe(
-            duplicados_300.drop(columns=["latitud", "longitud"]),
-            use_container_width=True,
-            hide_index=True,
+    if _hay_fuente_url:
+        col_espacio_tab1, col_refrescar_tab1 = st.columns([5, 1.6])
+        with col_refrescar_tab1:
+            if st.button(
+                "🔄 Actualizar Excel de puente", use_container_width=True,
+                type="primary", key="refrescar_puente_tab1",
+            ):
+                if _refrescar_puntos_desde_url():
+                    st.rerun()
+        st.caption(
+            "Dale clic aquí si acaban de agregar puntos nuevos al Excel de "
+            "puente y quieres traerlos sin salir de esta pestaña."
         )
 
-    st.divider()
     st.markdown("#### 🔎 Revisar un punto específico")
-    st.write("Busca uno en particular para ver su ubicación exacta y si tiene algo cerca.")
+    st.write(
+        "Busca uno en particular para ver su ubicación exacta y si tiene "
+        "algo cerca — así detectas la duplicidad antes de registrarlo."
+    )
 
     modo_busqueda = st.radio(
         "¿Cómo quieres buscar?",
@@ -695,10 +731,11 @@ with tab1:
             )
         consulta_punto = st.session_state.get("resultado_busqueda_punto")
 
-    # ---- Resultado compartido para "Por dirección" y "Por coordenada" ----
     if consulta_punto is not None:
         lat_c, lon_c = consulta_punto["lat"], consulta_punto["lon"]
         cercanos = detectar_coincidencias(df, lat_c, lon_c, "")
+
+        st.divider()
 
         # 1) Primero Google Maps + Street View del punto consultado.
         st.write("📍 **Vista de calle del lugar consultado:**")
@@ -715,6 +752,23 @@ with tab1:
             "disponible."
         )
 
+        # 2) Después el mapa general, centrado y resaltado en el punto buscado.
+        st.write("**Ese punto en el mapa general (queda en rojo):**")
+        capas_tab1 = st.multiselect(
+            "Capas a mostrar",
+            ["Especialistas (Excel)", "Operación (Survey)", "Generadores"],
+            default=["Especialistas (Excel)", "Generadores"],
+            key="capas_mapa_tab1",
+        )
+        renderizar_mapa_general(
+            capas_tab1,
+            df_especialistas=df,
+            df_operacion=None,
+            df_generadores_agrupado=generadores_agrupados,
+            punto_resaltado=(lat_c, lon_c, consulta_punto["etiqueta"]),
+        )
+
+        # 3) Y por último, si hay algo cerca, por qué se marca como posible duplicado.
         if not cercanos.empty:
             st.warning(
                 f"⚠️ Posible duplicidad — se encontraron {len(cercanos)} punto(s) "
@@ -735,6 +789,7 @@ with tab1:
                         + (f" · practicante **{row['practicante']}**" if row.get("practicante") else "")
                     )
                     cc1.caption(f"{row['ciudad']} · Fecha: {row['fecha_registro']}")
+                    cc1.markdown(f"🔍 **Por qué se marca como posible duplicado:** {row['coincide_por']}")
                     cc2.markdown(f"Comité: **{row['estado_comite'] or 'Pendiente'}**")
         else:
             st.success(
@@ -743,27 +798,49 @@ with tab1:
                 icon="✅",
             )
 
-        # 2) Después el mapa combinado (nuestro), centrado en el punto buscado.
-        st.write("**Ese punto en el mapa general (queda en rojo):**")
-        capas_tab1 = st.multiselect(
-            "Capas a mostrar",
-            ["Especialistas (Excel)", "Operación (Survey)", "Generadores"],
-            default=["Especialistas (Excel)", "Generadores"],
-            key="capas_mapa_tab1",
-        )
-        renderizar_mapa_general(
-            capas_tab1,
-            df_especialistas=df,
-            df_operacion=None,
-            df_generadores_agrupado=st.session_state.get("generadores_agrupados"),
-            punto_resaltado=(lat_c, lon_c, consulta_punto["etiqueta"]),
+    st.divider()
+    st.markdown("#### 🗺️ Mapa general")
+    capas_generales = st.multiselect(
+        "Capas a mostrar",
+        ["Especialistas (Excel)", "Operación (Survey)", "Generadores"],
+        default=["Especialistas (Excel)", "Generadores"],
+        key="capas_mapa_general",
+    )
+    renderizar_mapa_general(
+        capas_generales,
+        df_especialistas=df,
+        df_operacion=None,
+        df_generadores_agrupado=generadores_agrupados,
+        punto_resaltado=None,
+    )
+
+    st.markdown("#### 📋 Posibles duplicados (radio de 300 m)")
+    st.caption(
+        "Agrupa puntos con nombre igual o parecido a menos de 300 m entre "
+        "sí — el mismo radio con el que se recogen generadores. Para que "
+        "queden en un mismo grupo aquí, el nombre Y la ubicación tienen que "
+        "coincidir (por eso el motivo siempre dice 'Ubicación y nombre')."
+    )
+    duplicados_300 = agrupar_puntos_por_radio(df, umbral_m=300)
+    if duplicados_300.empty:
+        st.success("No se encontraron grupos de puntos duplicados dentro de 300 m.")
+    else:
+        duplicados_300 = duplicados_300.assign(por_que="Ubicación y nombre")
+        st.warning(f"Se encontraron {len(duplicados_300)} grupo(s) con más de un punto:")
+        st.dataframe(
+            duplicados_300.drop(columns=["latitud", "longitud"]).rename(
+                columns={"por_que": "Por qué se duplica"}
+            ),
+            use_container_width=True,
+            hide_index=True,
         )
 
     st.divider()
     st.markdown("#### 📊 Estado de comité")
     st.caption(
-        "Qué puntos fueron aprobados en comité, aprobados con tareas, con "
-        "tareas, o descartados — columna 'Estatus en bitácora' del Excel."
+        "Qué puntos fueron aprobados en comité, aprobados con tareas, o "
+        "descartados — columna 'Estatus en bitácora' del Excel. Solo se "
+        "muestran aquí los puntos que ya tienen ese estatus diligenciado."
     )
 
     fc1, fc2, fc3 = st.columns(3)
@@ -774,10 +851,13 @@ with tab1:
     opciones_comite_seg = sorted([v for v in df["estado_comite"].dropna().unique() if str(v).strip()])
     filtro_comite = fc3.multiselect(
         "Estado de comité", opciones_comite_seg, default=[],
-        help="Deja vacío para ver todos, incluyendo los que aún no han pasado por comité.",
+        help="Deja vacío para ver todos los que ya tienen estatus de comité.",
     )
 
-    df_filtrado = df.copy()
+    # Solo se muestran los puntos que YA tienen algo en "Estatus en
+    # bitácora" — los que aún no han pasado por comité no salen en esta
+    # tabla (aunque sí siguen apareciendo en el resto de la app).
+    df_filtrado = df[df["estado_comite"].astype(str).str.strip() != ""].copy()
     if filtro_ciudad:
         df_filtrado = df_filtrado[df_filtrado["ciudad"].isin(filtro_ciudad)]
     if filtro_especialista:
@@ -785,63 +865,17 @@ with tab1:
     if filtro_comite:
         df_filtrado = df_filtrado[df_filtrado["estado_comite"].isin(filtro_comite)]
 
-    st.dataframe(
-        df_filtrado[
-            ["id", "especialista", "practicante", "ciudad", "local_identificado",
-             "fecha_registro", "estado_comite"]
-        ],
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    with st.expander("✏️ Actualizar estado de comité o notas"):
-        columnas_editor = [
-            "id", "especialista", "practicante", "ciudad", "local_identificado",
-            "fecha_registro", "estado_comite", "notas",
-        ]
-        edited = st.data_editor(
-            df_filtrado[columnas_editor],
-            column_config={
-                "estado_comite": st.column_config.SelectboxColumn(
-                    "estado_comite", options=["", *opciones_comite_seg]
-                ),
-            },
-            disabled=[c for c in columnas_editor if c not in ("estado_comite", "notas")],
+    if df_filtrado.empty:
+        st.info("Todavía no hay puntos con estatus de comité diligenciado.")
+    else:
+        st.dataframe(
+            df_filtrado[
+                ["id", "especialista", "practicante", "ciudad", "local_identificado",
+                 "fecha_registro", "estado_comite"]
+            ],
             use_container_width=True,
             hide_index=True,
-            key="editor_comite",
         )
-        if st.button("💾 Guardar cambios", type="primary", key="guardar_comite"):
-            df_actualizado = df.set_index("id")
-            edited_idx = edited.set_index("id")
-            df_actualizado.update(edited_idx)
-            st.session_state.puntos = df_actualizado.reset_index()
-            guardar_puntos(st.session_state.puntos)
-            st.success("Cambios guardados.")
-            st.rerun()
-
-    with st.expander("🗑️ Eliminar un punto (por ejemplo, uno de prueba)"):
-        st.write(
-            "Úsalo para borrar puntos que no deberían estar, como pruebas o "
-            "duplicados metidos por error. Esta acción no se puede deshacer."
-        )
-        if df.empty:
-            st.caption("No hay puntos registrados todavía.")
-        else:
-            opciones_borrar = {
-                f"#{row.id} · {row.local_identificado} · {row.especialista}": row.id
-                for row in df.itertuples()
-            }
-            etiqueta_elegida = st.selectbox(
-                "Elige el punto a eliminar", list(opciones_borrar.keys())
-            )
-            id_a_borrar = opciones_borrar[etiqueta_elegida]
-            confirmar = st.checkbox(f"Sí, quiero eliminar el punto #{id_a_borrar} definitivamente")
-            if st.button("🗑️ Eliminar este punto", disabled=not confirmar):
-                st.session_state.puntos = eliminar_punto(df, id_a_borrar)
-                guardar_puntos(st.session_state.puntos)
-                st.success(f"Punto #{id_a_borrar} eliminado.")
-                st.rerun()
 
 # ---------------------------------------------------------------------------
 # MÓDULO 2 · Generadores
@@ -855,10 +889,18 @@ with tab2:
         "Survey123 — una por cada punto — sin que nadie lo note. Consulta "
         "aquí antes de registrar uno nuevo en campo."
     )
+    st.caption(
+        "🟠 **Naranja** = generador único &nbsp;·&nbsp; "
+        "🔵 **Azul** = generador repetido (dos o más registros a menos de "
+        f"{UMBRAL_DUPLICIDAD_GENERADOR_M:.0f} m entre sí)."
+    )
 
     col_espacio_gen, col_refrescar_gen = st.columns([5, 1.6])
     with col_refrescar_gen:
-        if st.button("🔄 Actualizar generadores", use_container_width=True, type="primary"):
+        if st.button(
+            "🔄 Actualizar generadores", use_container_width=True,
+            type="primary", key="refrescar_generadores_tab2",
+        ):
             _leer_generadores_cacheado.clear()
             try:
                 nuevo_df_gen = _leer_generadores_cacheado()
@@ -867,7 +909,6 @@ with tab2:
             else:
                 st.session_state.generadores = nuevo_df_gen
                 guardar_generadores(nuevo_df_gen)
-                st.session_state.pop("generadores_agrupados", None)
                 st.rerun()
 
     if error_generadores:
@@ -886,10 +927,6 @@ with tab2:
     else:
         st.caption(f"📡 Conectado en vivo a la capa de Survey123 · {len(df_generadores)} registros cargados")
 
-        generadores_agrupados = st.session_state.get("generadores_agrupados")
-        if generadores_agrupados is None or generadores_agrupados.empty:
-            generadores_agrupados = agrupar_generadores(df_generadores)
-
         st.markdown("#### 🗺️ Mapa de generadores")
         modo_mapa_gen = st.radio(
             "¿Cuáles quieres ver?",
@@ -897,9 +934,16 @@ with tab2:
             horizontal=True,
             key="modo_mapa_generadores",
         )
-        renderizar_mapa_generadores(generadores_agrupados, modo_mapa_gen)
+        renderizar_mapa_generadores(generadores_agrupados, modo_mapa_gen, key="mapa_generadores_tab2")
 
         st.markdown("#### ⚠️ Alertas de duplicidad (radio de 300 m)")
+        st.caption(
+            "Cada fila de aquí abajo es un generador que quedó registrado "
+            "MÁS DE UNA VEZ (probablemente por especialistas distintos, con "
+            "nombres distintos, pero en el mismo lugar). La columna "
+            "'nombre_generador' es el nombre representativo del grupo — no "
+            "significa que todos lo hayan escrito igual."
+        )
         alertas_gen = generadores_agrupados[generadores_agrupados["cantidad_registros"] > 1]
         if alertas_gen.empty:
             st.success("No hay generadores repetidos por ahora.")
@@ -907,92 +951,151 @@ with tab2:
             st.warning(f"{len(alertas_gen)} generador(es) parecen estar registrados más de una vez:")
             st.dataframe(
                 alertas_gen[
-                    ["nombre_generador", "tipo_generador", "cantidad_registros", "puntos_asociados"]
-                ],
+                    [
+                        "nombre_generador", "tipo_generador", "cantidad_registros",
+                        "puntos_asociados", "especialistas_asociados",
+                    ]
+                ].rename(columns={
+                    "nombre_generador": "Generador (repetido)",
+                    "tipo_generador": "Tipo",
+                    "cantidad_registros": "Veces registrado",
+                    "puntos_asociados": "Puntos potenciales asociados",
+                    "especialistas_asociados": "Especialistas que lo repitieron",
+                }),
                 use_container_width=True,
                 hide_index=True,
             )
 
         st.divider()
         st.markdown("#### Consultar antes de registrar un generador nuevo")
-        with st.form("form_consulta_generador"):
-            cg1, cg2, cg3 = st.columns(3)
-            nombre_gen = cg1.text_input("Nombre del generador", placeholder="Ej. Bancolombia")
-            lat_gen = cg2.number_input("Latitud", value=4.650000, format="%.6f", key="lat_gen")
-            lon_gen = cg3.number_input("Longitud", value=-74.080000, format="%.6f", key="lon_gen")
-            consultar_gen = st.form_submit_button(
-                "🔍 Consultar generador", use_container_width=True, type="primary"
+        st.write(
+            "Busca por coordenada o dirección (no por nombre) — dos "
+            "especialistas pueden ponerle nombres distintos al mismo "
+            "generador (ej. 'Conjunto Acanto' vs 'Conjunto Residencial "
+            "Acanto'), así que lo que de verdad confirma si ya existe es "
+            "la ubicación."
+        )
+
+        modo_busqueda_gen = st.radio(
+            "¿Cómo quieres buscar?",
+            ["Por dirección", "Por coordenada"],
+            horizontal=True,
+            key="modo_busqueda_gen",
+            label_visibility="collapsed",
+        )
+
+        consulta_gen = None
+
+        if modo_busqueda_gen == "Por dirección":
+            direccion_gen = st.text_input(
+                "Escribe la dirección del generador", key="direccion_gen",
+                placeholder="Ej. Carrera 15 # 93-60, Bogotá",
             )
-
-        if consultar_gen:
-            if not nombre_gen.strip():
-                st.error("Escribe el nombre del generador para poder consultar.")
-            else:
-                coincidencias_gen = detectar_generadores_coincidentes(
-                    df_generadores, nombre_gen, lat_gen, lon_gen
-                )
-                if coincidencias_gen.empty:
-                    st.success(
-                        "✅ No se encontró ningún generador igual o parecido "
-                        f"a menos de {UMBRAL_DUPLICIDAD_GENERADOR_M} m. Parece nuevo, "
-                        "puedes registrarlo en Survey123.",
-                        icon="✅",
-                    )
+            nombre_gen = st.text_input(
+                "Nombre del generador (opcional, solo informativo)",
+                key="nombre_gen_direccion", placeholder="Ej. Bancolombia",
+            )
+            if st.button("🔍 Consultar generador", type="primary", key="consultar_gen_direccion_btn"):
+                with st.spinner("Buscando dirección..."):
+                    resultado_gen = buscar_coordenada_por_direccion(direccion_gen)
+                if resultado_gen is None:
+                    st.session_state["error_busqueda_gen"] = True
+                    st.session_state.pop("consulta_gen_resultado", None)
                 else:
-                    puntos_ya_vinculados = sorted(
-                        set(coincidencias_gen["nombre_punto_potencial"]) - {""}
-                    )
-                    st.warning(
-                        f"⚠️ Ya existe un generador igual o muy parecido, vinculado a: "
-                        f"**{', '.join(puntos_ya_vinculados) if puntos_ya_vinculados else 'otro punto'}**. "
-                        "Considera vincularlo al punto actual en Survey123 en vez de "
-                        "crear uno nuevo.",
-                        icon="⚠️",
-                    )
-                    st.dataframe(
-                        coincidencias_gen[
-                            [
-                                "nombre_generador", "nombre_punto_potencial", "tipo_generador",
-                                "distancia_m", "similitud_nombre", "localizador",
-                            ]
-                        ],
-                        use_container_width=True,
-                        hide_index=True,
-                    )
+                    lat_g, lon_g, etiqueta_g = resultado_gen
+                    st.session_state["consulta_gen_resultado"] = {
+                        "lat": lat_g, "lon": lon_g, "etiqueta": etiqueta_g, "nombre": nombre_gen,
+                    }
+                    st.session_state["error_busqueda_gen"] = False
 
-        st.divider()
-        st.markdown("#### Generadores únicos registrados hasta hoy")
-        st.caption(
-            "Cada fila es un generador físico único (ya agrupado); la columna "
-            "'puntos_asociados' muestra a cuántos puntos potenciales distintos "
-            "quedó vinculado."
-        )
+            if st.session_state.get("error_busqueda_gen"):
+                st.error("No se encontró esa dirección. Intenta agregar la ciudad.")
+            consulta_gen = st.session_state.get("consulta_gen_resultado")
 
-        tipos_generador = sorted(
-            [t for t in df_generadores["tipo_generador"].dropna().unique() if str(t).strip()]
-        )
-        filtro_tipo_gen = st.multiselect("Tipo de generador", tipos_generador, default=[])
+        else:  # Por coordenada
+            coord_pegada_gen = st.text_input(
+                "Pega la coordenada completa (latitud, longitud)",
+                key="coord_pegada_gen",
+                placeholder="Ej. 4.697539545568918, -74.09220071349365",
+            )
+            nombre_gen_coord = st.text_input(
+                "Nombre del generador (opcional, solo informativo)",
+                key="nombre_gen_coordenada", placeholder="Ej. Bancolombia",
+            )
+            st.caption(
+                "Pégala completa, con todos los decimales que traiga — así el "
+                "punto no se desplaza."
+            )
+            if st.button("🔍 Consultar generador", type="primary", key="consultar_gen_coord_btn"):
+                coord_g = parsear_coordenada_pegada(coord_pegada_gen)
+                if coord_g is None:
+                    st.session_state["error_busqueda_gen"] = True
+                    st.session_state.pop("consulta_gen_resultado", None)
+                else:
+                    lat_g, lon_g = coord_g
+                    st.session_state["consulta_gen_resultado"] = {
+                        "lat": lat_g, "lon": lon_g,
+                        "etiqueta": f"Coordenada {lat_g}, {lon_g}",
+                        "nombre": nombre_gen_coord,
+                    }
+                    st.session_state["error_busqueda_gen"] = False
 
-        generadores_mostrar = generadores_agrupados
-        if filtro_tipo_gen:
-            generadores_mostrar = generadores_mostrar[
-                generadores_mostrar["tipo_generador"].isin(filtro_tipo_gen)
-            ]
+            if st.session_state.get("error_busqueda_gen"):
+                st.error(
+                    "Eso no tiene forma de coordenada. Debe verse así: "
+                    "'4.697539545568918, -74.09220071349365'."
+                )
+            consulta_gen = st.session_state.get("consulta_gen_resultado")
 
-        c1g, c2g = st.columns(2)
-        c1g.metric("Generadores únicos", len(generadores_mostrar))
-        c2g.metric(
-            "Vinculados a más de un punto",
-            int((generadores_mostrar["cantidad_registros"] > 1).sum()),
-        )
+        if consulta_gen is not None:
+            lat_gc, lon_gc = consulta_gen["lat"], consulta_gen["lon"]
+            st.write("📍 **Vista de calle del lugar consultado:**")
+            col_mapa_gen, col_calle_gen = st.columns(2)
+            with col_mapa_gen:
+                st.caption("Mapa")
+                components.iframe(url_mapa_embed(lat_gc, lon_gc), height=300)
+            with col_calle_gen:
+                st.caption("Street View")
+                components.iframe(url_streetview_embed(lat_gc, lon_gc), height=300)
 
-        st.dataframe(
-            generadores_mostrar[
-                ["nombre_generador", "tipo_generador", "cantidad_registros", "puntos_asociados"]
-            ],
-            use_container_width=True,
-            hide_index=True,
-        )
+            coincidencias_gen = detectar_generadores_coincidentes(
+                df_generadores, lat_gc, lon_gc, nombre=consulta_gen.get("nombre", "")
+            )
+            if coincidencias_gen.empty:
+                st.success(
+                    "✅ No se encontró ningún generador registrado a menos de "
+                    f"{UMBRAL_DUPLICIDAD_GENERADOR_M:.0f} m de esa ubicación. "
+                    "Parece nuevo, puedes registrarlo en Survey123.",
+                    icon="✅",
+                )
+            else:
+                puntos_ya_vinculados = sorted(
+                    set(coincidencias_gen["nombre_punto_potencial"]) - {""}
+                )
+                st.warning(
+                    f"⚠️ Ya existe {len(coincidencias_gen)} generador(es) registrado(s) "
+                    f"a menos de {UMBRAL_DUPLICIDAD_GENERADOR_M:.0f} m, vinculado(s) a: "
+                    f"**{', '.join(puntos_ya_vinculados) if puntos_ya_vinculados else 'otro punto'}**. "
+                    "Considera vincularlo al punto actual en Survey123 en vez de "
+                    "crear uno nuevo.",
+                    icon="⚠️",
+                )
+                st.dataframe(
+                    coincidencias_gen[
+                        [
+                            "nombre_generador", "nombre_punto_potencial", "tipo_generador",
+                            "distancia_m", "localizador",
+                        ]
+                    ].rename(columns={
+                        "nombre_generador": "Nombre registrado",
+                        "nombre_punto_potencial": "Punto potencial asociado",
+                        "tipo_generador": "Tipo",
+                        "distancia_m": "Distancia (m)",
+                        "localizador": "Localizador",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
 st.divider()
 st.caption(
