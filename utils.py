@@ -181,15 +181,53 @@ HOJA_EXCEL_PREFERIDA = "ISO (2)"
 
 
 def _leer_excel_hoja_preferida(fuente) -> pd.DataFrame:
-    """Lee el Excel priorizando la hoja HOJA_EXCEL_PREFERIDA; si no existe, usa la primera hoja."""
+    """
+    Lee el Excel priorizando la hoja donde vive el estatus de comité.
+
+    En vez de exigir que el nombre de la hoja sea EXACTAMENTE
+    "ISO (2)" (lo que se rompe con cosas tan tontas como un espacio de más
+    o mayúsculas distintas), esto hace dos cosas para ser más tolerante:
+
+    1) Busca, entre todas las hojas del archivo, una cuyo nombre normalizado
+       (sin mayúsculas, sin espacios de más) coincida con HOJA_EXCEL_PREFERIDA.
+    2) Si no la encuentra por nombre, busca entre TODAS las hojas cuál tiene
+       una columna que se parezca a "Estatus en bitácora" (la que trae el
+       estado de comité) y usa esa — así, aunque le cambien el nombre a la
+       hoja el próximo mes, la app la sigue encontrando sola.
+
+    Si ninguna de las dos búsquedas encuentra nada, usa la primera hoja
+    como respaldo (como antes), para no dejar la app sin datos.
+    """
+    if hasattr(fuente, "seek"):
+        fuente.seek(0)
+
     try:
-        if hasattr(fuente, "seek"):
-            fuente.seek(0)
-        return pd.read_excel(fuente, sheet_name=HOJA_EXCEL_PREFERIDA)
-    except ValueError:
+        excel = pd.ExcelFile(fuente)
+    except Exception:
         if hasattr(fuente, "seek"):
             fuente.seek(0)
         return pd.read_excel(fuente, sheet_name=0)
+
+    nombres_hojas = excel.sheet_names
+    objetivo_normalizado = normalizar_texto(HOJA_EXCEL_PREFERIDA)
+
+    # 1) Coincidencia de nombre, tolerante a espacios/mayúsculas.
+    for nombre_hoja in nombres_hojas:
+        if normalizar_texto(nombre_hoja) == objetivo_normalizado:
+            return excel.parse(sheet_name=nombre_hoja)
+
+    # 2) Ninguna hoja se llama así — busca cuál tiene la columna de estatus.
+    variantes_estatus = {normalizar_texto(v) for v in _VARIANTES_COLUMNAS["estado_comite"]}
+    for nombre_hoja in nombres_hojas:
+        try:
+            columnas_hoja = {normalizar_texto(c) for c in excel.parse(sheet_name=nombre_hoja, nrows=0).columns}
+        except Exception:
+            continue
+        if columnas_hoja & variantes_estatus:
+            return excel.parse(sheet_name=nombre_hoja)
+
+    # 3) Respaldo: primera hoja, como se hacía antes.
+    return excel.parse(sheet_name=0)
 
 
 def leer_archivo_fuente(ruta_o_buffer, nombre_archivo: str = "") -> pd.DataFrame:
@@ -435,14 +473,71 @@ def buscar_por_nombre(
     return resultado.sort_values("similitud_nombre", ascending=False)
 
 
+# Abreviaturas comunes en direcciones colombianas que el buscador gratuito
+# (Nominatim/OpenStreetMap) a veces no reconoce bien si vienen abreviadas
+# ("Cra", "Cl", "#", etc.) — se prueban también en su forma completa.
+_ABREVIATURAS_DIRECCION = [
+    (r"\bcra\.?\b", "Carrera"),
+    (r"\bkr\.?\b", "Carrera"),
+    (r"\bcl\.?\b", "Calle"),
+    (r"\bcll\.?\b", "Calle"),
+    (r"\bdg\.?\b", "Diagonal"),
+    (r"\btv\.?\b", "Transversal"),
+    (r"\btrv\.?\b", "Transversal"),
+    (r"\bav\.?\b", "Avenida"),
+]
+
+
+def _variantes_direccion(direccion: str) -> list:
+    """
+    Arma varias formas de escribir la misma dirección, de la más parecida a
+    lo que escribió la persona a la más "limpia", para intentarlas en orden
+    hasta que el buscador encuentre algo. Esto ayuda porque el buscador
+    gratuito de direcciones (OpenStreetMap) a veces no reconoce bien
+    abreviaturas ("Cra", "Cl") ni el símbolo '#' típico de las direcciones
+    colombianas.
+    """
+    variantes = [direccion]
+
+    tiene_colombia = "colombia" in direccion.lower()
+    if not tiene_colombia:
+        variantes.append(f"{direccion}, Colombia")
+
+    limpia = direccion
+    for patron, reemplazo in _ABREVIATURAS_DIRECCION:
+        limpia = re.sub(patron, reemplazo, limpia, flags=re.IGNORECASE)
+    limpia = limpia.replace("#", "No. ")
+    limpia = re.sub(r"\s+", " ", limpia).strip()
+    if limpia != direccion:
+        variantes.append(limpia)
+        if "colombia" not in limpia.lower():
+            variantes.append(f"{limpia}, Colombia")
+
+    # Quita duplicados conservando el orden.
+    vistas = set()
+    unicas = []
+    for v in variantes:
+        if v not in vistas:
+            vistas.add(v)
+            unicas.append(v)
+    return unicas
+
+
 def buscar_coordenada_por_direccion(direccion: str, timeout: int = 10):
     """
     Busca una dirección escrita (como en el buscador de Google Maps) y
     devuelve (lat, lon, nombre_encontrado) del resultado más probable.
 
     Usa el buscador gratuito de OpenStreetMap (Nominatim) — no necesita
-    API key ni cuenta de Google. Devuelve None si no encuentra nada o si
-    falla la conexión.
+    API key ni cuenta de Google. Prueba varias formas de escribir la misma
+    dirección (con Colombia agregado, con las abreviaturas resueltas, etc.)
+    antes de rendirse, porque este buscador es más sensible al formato
+    exacto que el de Google Maps. Aun así, para direcciones muy nuevas o
+    muy específicas puede no encontrar nada — en ese caso, lo más seguro
+    sigue siendo copiar la coordenada directamente desde Google Maps y
+    pegarla en el buscador "Por coordenada".
+
+    Devuelve None si ninguna variante encontró nada o si falla la conexión.
     """
     import requests
 
@@ -450,34 +545,37 @@ def buscar_coordenada_por_direccion(direccion: str, timeout: int = 10):
     if not direccion:
         return None
 
-    try:
-        resp = requests.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={
-                "q": direccion,
-                "format": "json",
-                "limit": 1,
-                "countrycodes": "co",
-            },
-            headers={"User-Agent": "oxxo-puntos-potenciales-app (practica-oxxo)"},
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        resultados = resp.json()
-    except Exception:
-        return None
+    for variante in _variantes_direccion(direccion):
+        try:
+            resp = requests.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={
+                    "q": variante,
+                    "format": "json",
+                    "limit": 1,
+                    "countrycodes": "co",
+                },
+                headers={"User-Agent": "oxxo-puntos-potenciales-app (practica-oxxo)"},
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            resultados = resp.json()
+        except Exception:
+            continue
 
-    if not resultados:
-        return None
+        if not resultados:
+            continue
 
-    primero = resultados[0]
-    try:
-        lat = float(primero["lat"])
-        lon = float(primero["lon"])
-    except (KeyError, TypeError, ValueError):
-        return None
+        primero = resultados[0]
+        try:
+            lat = float(primero["lat"])
+            lon = float(primero["lon"])
+        except (KeyError, TypeError, ValueError):
+            continue
 
-    return lat, lon, primero.get("display_name", direccion)
+        return lat, lon, primero.get("display_name", direccion)
+
+    return None
 
 
 def parsear_coordenada_pegada(texto: str):
