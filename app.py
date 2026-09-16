@@ -20,6 +20,7 @@ import pydeck as pdk
 import streamlit as st
 import streamlit.components.v1 as components
 
+from iconos import icon_data
 from utils import (
     UMBRAL_DUPLICIDAD_GENERADOR_M,
     UMBRAL_DUPLICIDAD_M,
@@ -49,26 +50,6 @@ RUTA_EXCEL_BUNDLED = Path("data/Puntos_potenciales.xlsx")
 # incluido en el proyecto (RUTA_EXCEL_BUNDLED) como hasta ahora.
 SECRET_KEY_URL_COMITE = "url_puente_comite"
 
-# Color morado por defecto para los puntos potenciales en los mapas
-# (mismo estilo que ya reconoce el área). El interruptor "Colorear por
-# especialista" lo reemplaza por una paleta distinta por persona.
-COLOR_MORADO = [124, 58, 168]
-_PALETA_ESPECIALISTAS = [
-    [124, 58, 168], [230, 126, 34], [39, 174, 96], [41, 128, 185],
-    [192, 57, 43], [22, 160, 133], [211, 84, 0], [142, 68, 173],
-    [44, 62, 80], [243, 156, 18], [26, 188, 156], [127, 140, 141],
-]
-
-
-def color_por_especialista(nombre: str):
-    """Color determinístico (siempre el mismo para el mismo nombre) tomado de una paleta fija."""
-    nombre = str(nombre or "").strip()
-    if not nombre:
-        return [150, 150, 150]
-    indice = sum(ord(c) for c in nombre) % len(_PALETA_ESPECIALISTAS)
-    return _PALETA_ESPECIALISTAS[indice]
-
-
 def url_mapa_embed(lat: float, lon: float, zoom: int = 17) -> str:
     """Google Maps normal (satelital/calles), centrado en el punto. No necesita cuenta ni API key."""
     return f"https://maps.google.com/maps?q={lat},{lon}&z={zoom}&output=embed"
@@ -82,31 +63,41 @@ def url_streetview_embed(lat: float, lon: float) -> str:
 # ---------------------------------------------------------------------------
 # Mapa general combinado (Especialistas / Operación / Generadores)
 # ---------------------------------------------------------------------------
-# Colores por capa — los que pediste: morado para especialistas, azul claro
-# para operación. Generadores y el punto resaltado de una búsqueda usan
-# colores distintos para no confundirse con los anteriores.
-COLOR_OPERACION = [93, 173, 226]      # azul claro
-COLOR_GENERADOR = [230, 126, 34]      # naranja
-COLOR_RESALTADO = [225, 30, 30]       # rojo, para el punto que se acaba de buscar
+# Colores por capa (ahora como pines en forma de gota, ver iconos.py) — los
+# que pediste: morado para especialistas, azul claro para operación.
+# Generadores y el punto resaltado de una búsqueda usan colores distintos
+# para no confundirse con los anteriores.
 
 # Vista por defecto del mapa: siempre abre centrado en Bogotá.
 BOGOTA_LAT = 4.6097
 BOGOTA_LON = -74.0817
 ZOOM_BOGOTA_DEFAULT = 10
 
-# Los puntos se dibujan con un tamaño FIJO EN PIXELES, no en metros — así
-# se ven siempre como un pin normal, sin importar cuánto zoom se le haga
-# (con radio en metros, un punto se puede ver del tamaño de una manzana
-# entera al acercar mucho el zoom). Para que esto quede garantizado sin
-# depender de una sola propiedad, se usan DOS mecanismos a la vez:
-#   1) radius_units="pixels" + get_radius chico.
-#   2) radius_min_pixels / radius_max_pixels, que ponen un tope duro al
-#      tamaño en pantalla pase lo que pase — esta es la red de seguridad
-#      real contra puntos "gigantes".
-RADIO_PUNTO_MAPA_PX = 4
-RADIO_PUNTO_MAPA_PX_MAX = 6
-RADIO_RESALTADO_PX = 6
-RADIO_RESALTADO_PX_MAX = 9
+# Tamaño (alto, en pixeles de pantalla) de los pines en el mapa. Van en
+# pixeles fijos, no en metros — así se ven siempre del mismo tamaño
+# razonable sin importar cuánto zoom se le haga (con un tamaño en metros,
+# un punto se puede ver del tamaño de una manzana entera al acercar mucho
+# el zoom). size_min_pixels/size_max_pixels ponen además un tope duro al
+# tamaño real en pantalla, pase lo que pase.
+TAMANO_PIN_PX = 30
+TAMANO_PIN_RESALTADO_PX = 42
+
+
+def _capa_pines(d: pd.DataFrame, color_key: str, size: int = TAMANO_PIN_PX) -> pdk.Layer:
+    """
+    Arma una capa de pines (ícono en forma de gota, como en Google Maps)
+    para el color dado — en vez de los círculos planos que se usaban antes.
+    color_key es una de las claves de iconos.py: morado, azul_claro,
+    naranja, rojo, azul_repetido, gris.
+    """
+    d = d.copy()
+    d["icon_data"] = [icon_data(color_key, size)] * len(d)
+    return pdk.Layer(
+        "IconLayer", data=d, get_position="[longitud, latitud]",
+        get_icon="icon_data", get_size=size, size_units="pixels",
+        size_min_pixels=max(14, size - 10), size_max_pixels=size + 16,
+        pickable=True,
+    )
 
 
 def _columna_tooltip_especialistas(d: pd.DataFrame) -> pd.Series:
@@ -152,36 +143,20 @@ def renderizar_mapa_general(
         if df_especialistas is not None and not df_especialistas.empty:
             d = df_especialistas.dropna(subset=["latitud", "longitud"]).copy()
             if not d.empty:
-                d["color"] = [COLOR_MORADO] * len(d)
                 d["tooltip_text"] = _columna_tooltip_especialistas(d)
-                capas.append(
-                    pdk.Layer(
-                        "ScatterplotLayer", data=d, get_position="[longitud, latitud]",
-                        get_fill_color="color", get_radius=RADIO_PUNTO_MAPA_PX, radius_units="pixels",
-                        radius_min_pixels=RADIO_PUNTO_MAPA_PX, radius_max_pixels=RADIO_PUNTO_MAPA_PX_MAX,
-                        pickable=True,
-                    )
-                )
+                capas.append(_capa_pines(d, "morado"))
 
     if "Operación (Survey)" in capas_activas:
         if df_operacion is not None and not df_operacion.empty:
             d = df_operacion.dropna(subset=["latitud", "longitud"]).copy()
             if not d.empty:
-                d["color"] = [COLOR_OPERACION] * len(d)
                 nombre_col = "local_identificado" if "local_identificado" in d.columns else (
                     "nombre" if "nombre" in d.columns else None
                 )
                 d["tooltip_text"] = (
                     "📍 " + d[nombre_col].astype(str) if nombre_col else "📍 Punto de operación"
                 )
-                capas.append(
-                    pdk.Layer(
-                        "ScatterplotLayer", data=d, get_position="[longitud, latitud]",
-                        get_fill_color="color", get_radius=RADIO_PUNTO_MAPA_PX, radius_units="pixels",
-                        radius_min_pixels=RADIO_PUNTO_MAPA_PX, radius_max_pixels=RADIO_PUNTO_MAPA_PX_MAX,
-                        pickable=True,
-                    )
-                )
+                capas.append(_capa_pines(d, "azul_claro"))
         else:
             st.caption(
                 "🔧 Capa 'Operación (Survey)' todavía no está conectada — "
@@ -192,31 +167,15 @@ def renderizar_mapa_general(
         if df_generadores_agrupado is not None and not df_generadores_agrupado.empty:
             d = df_generadores_agrupado.dropna(subset=["latitud", "longitud"]).copy()
             if not d.empty:
-                d["color"] = [COLOR_GENERADOR] * len(d)
                 d["tooltip_text"] = _columna_tooltip_generadores(d)
-                capas.append(
-                    pdk.Layer(
-                        "ScatterplotLayer", data=d, get_position="[longitud, latitud]",
-                        get_fill_color="color", get_radius=RADIO_PUNTO_MAPA_PX, radius_units="pixels",
-                        radius_min_pixels=RADIO_PUNTO_MAPA_PX, radius_max_pixels=RADIO_PUNTO_MAPA_PX_MAX,
-                        pickable=True,
-                    )
-                )
+                capas.append(_capa_pines(d, "naranja"))
 
     if punto_resaltado is not None:
         lat_h, lon_h, etiqueta_h = punto_resaltado
         d = pd.DataFrame(
             [{"latitud": lat_h, "longitud": lon_h, "tooltip_text": f"🔎 {etiqueta_h}"}]
         )
-        d["color"] = [COLOR_RESALTADO] * len(d)
-        capas.append(
-            pdk.Layer(
-                "ScatterplotLayer", data=d, get_position="[longitud, latitud]",
-                get_fill_color="color", get_radius=RADIO_RESALTADO_PX, radius_units="pixels",
-                radius_min_pixels=RADIO_RESALTADO_PX, radius_max_pixels=RADIO_RESALTADO_PX_MAX,
-                pickable=True,
-            )
-        )
+        capas.append(_capa_pines(d, "rojo", size=TAMANO_PIN_RESALTADO_PX))
         vista = pdk.ViewState(latitude=lat_h, longitude=lon_h, zoom=15)
     else:
         vista = pdk.ViewState(latitude=BOGOTA_LAT, longitude=BOGOTA_LON, zoom=ZOOM_BOGOTA_DEFAULT)
@@ -236,32 +195,31 @@ def renderizar_mapa_general(
 
 
 def mostrar_leyenda_colores(incluir_generadores=True, incluir_operacion=True, incluir_resaltado=False):
-    """Cuadro de texto fijo explicando qué significa cada color de punto en los mapas."""
-    partes = ["🟣 **Morado** = Especialistas (Excel)"]
+    """Fila de chips explicando qué significa cada color de pin en los mapas."""
+    chips = [chip_leyenda("morado", "Especialistas (Excel)")]
     if incluir_operacion:
-        partes.append("🔵 **Azul claro** = Operación (Survey)")
+        chips.append(chip_leyenda("azul_claro", "Operación (Survey)"))
     if incluir_generadores:
-        partes.append("🟠 **Naranja** = Generadores")
+        chips.append(chip_leyenda("naranja", "Generadores"))
     if incluir_resaltado:
-        partes.append("🔴 **Rojo** = el punto que acabas de buscar")
-    st.caption(" &nbsp;·&nbsp; ".join(partes))
+        chips.append(chip_leyenda("rojo", "El punto que acabas de buscar"))
+    st.markdown("".join(chips), unsafe_allow_html=True)
 
 
-COLOR_GENERADOR_UNICO = [230, 126, 34]     # naranja
-COLOR_GENERADOR_REPETIDO = [25, 85, 220]   # azul — antes era rojo, se veía casi
-                                            # igual al naranja al encimarse los puntos
-
-
-def renderizar_mapa_generadores(df_generadores_agrupado, mostrar, key="mapa_generadores"):
+def renderizar_mapa_generadores(df_generadores_agrupado, mostrar, key="mapa_generadores", punto_resaltado=None):
     """
     Mapa de generadores, con la opción de mostrar "Todos" o solo los
     "Repetidos" (cantidad_registros > 1 — la señal de duplicidad).
 
-    Si el clic directo sobre un punto es compatible con la versión de
-    Streamlit desplegada, al hacer clic en un generador se muestra su
-    Street View debajo del mapa. Si no es compatible (versión más
-    antigua), el mapa se sigue mostrando normal, solo sin esa función —
-    nunca se cae la app por esto.
+    Si se pasa punto_resaltado=(lat, lon, etiqueta) — por ejemplo, al elegir
+    un generador repetido de la tabla de alertas — se agrega un marcador
+    rojo extra y el mapa abre centrado y acercado ahí, en vez de la vista
+    general de Bogotá.
+
+    (Nota: se probó antes hacer clic directo sobre un punto del mapa para
+    seleccionar, pero esa función de Streamlit no anda bien en todas las
+    versiones y llegó a dejar el mapa en blanco — por eso ahora la
+    selección se hace eligiendo de una lista/tabla, que es más confiable.)
     """
     d = df_generadores_agrupado.dropna(subset=["latitud", "longitud"]).copy().reset_index(drop=True)
     if mostrar == "Solo repetidos":
@@ -270,43 +228,39 @@ def renderizar_mapa_generadores(df_generadores_agrupado, mostrar, key="mapa_gene
         st.info("No hay generadores para mostrar con esa selección.")
         return
 
-    d["color"] = d["cantidad_registros"].apply(
-        lambda n: COLOR_GENERADOR_REPETIDO if n > 1 else COLOR_GENERADOR_UNICO
-    )
     d["tooltip_text"] = _columna_tooltip_generadores(d)
-    capa = pdk.Layer(
-        "ScatterplotLayer", data=d, get_position="[longitud, latitud]",
-        get_fill_color="color", get_radius=RADIO_PUNTO_MAPA_PX, radius_units="pixels",
-        radius_min_pixels=RADIO_PUNTO_MAPA_PX, radius_max_pixels=RADIO_PUNTO_MAPA_PX_MAX,
-        pickable=True, auto_highlight=True,
+    d["icon_data"] = d["cantidad_registros"].apply(
+        lambda n: icon_data("azul_repetido" if n > 1 else "naranja", TAMANO_PIN_PX)
     )
-    vista = pdk.ViewState(latitude=BOGOTA_LAT, longitude=BOGOTA_LON, zoom=ZOOM_BOGOTA_DEFAULT)
-    deck = pdk.Deck(layers=[capa], initial_view_state=vista, tooltip={"text": "{tooltip_text}"}, map_style="light")
-
-    seleccionado = None
-    try:
-        evento = st.pydeck_chart(
-            deck, on_select="rerun", selection_mode="single-object", key=key,
+    capas = [
+        pdk.Layer(
+            "IconLayer", data=d, get_position="[longitud, latitud]",
+            get_icon="icon_data", get_size=TAMANO_PIN_PX, size_units="pixels",
+            size_min_pixels=TAMANO_PIN_PX - 10, size_max_pixels=TAMANO_PIN_PX + 16,
+            pickable=True,
         )
-        objetos = evento.selection.get("objects", {}) if evento is not None else {}
-        filas_click = objetos.get(capa.id, []) if objetos else []
-        if filas_click:
-            seleccionado = filas_click[0]
-    except TypeError:
-        # Streamlit desplegado no soporta on_select en pydeck_chart todavía
-        # (versión más vieja) — se muestra el mapa igual, sin clic.
-        st.pydeck_chart(deck)
+    ]
 
-    st.caption(
-        "🟠 **Naranja** = generador único &nbsp;·&nbsp; 🔵 **Azul** = generador "
-        "repetido (radio de 300 m). Dale clic a un punto para ver su Street View."
-    )
+    if punto_resaltado is not None:
+        lat_h, lon_h, etiqueta_h = punto_resaltado
+        d_resaltado = pd.DataFrame(
+            [{"latitud": lat_h, "longitud": lon_h, "tooltip_text": f"🔎 {etiqueta_h}"}]
+        )
+        capas.append(_capa_pines(d_resaltado, "rojo", size=TAMANO_PIN_RESALTADO_PX))
+        vista = pdk.ViewState(latitude=lat_h, longitude=lon_h, zoom=16)
+    else:
+        vista = pdk.ViewState(latitude=BOGOTA_LAT, longitude=BOGOTA_LON, zoom=ZOOM_BOGOTA_DEFAULT)
 
-    if seleccionado is not None:
-        lat_sel, lon_sel = seleccionado.get("latitud"), seleccionado.get("longitud")
-        if lat_sel is not None and lon_sel is not None:
-            st.write(f"📍 **Street View de '{seleccionado.get('nombre_generador', '')}':**")
-            components.iframe(url_streetview_embed(lat_sel, lon_sel), height=350)
+    deck = pdk.Deck(layers=capas, initial_view_state=vista, tooltip={"text": "{tooltip_text}"}, map_style="light")
+    st.pydeck_chart(deck, key=key)
+
+    chips_gen = [
+        chip_leyenda("naranja", "Generador único"),
+        chip_leyenda("azul_repetido", f"Generador repetido (radio de {UMBRAL_DUPLICIDAD_GENERADOR_M:.0f} m)"),
+    ]
+    if punto_resaltado is not None:
+        chips_gen.append(chip_leyenda("rojo", "El que elegiste de la tabla"))
+    st.markdown("".join(chips_gen), unsafe_allow_html=True)
 
 
 # Paleta de marca OXXO (rojo #E21C2A y naranja/amarillo #F0A929 son los
@@ -389,10 +343,154 @@ st.markdown(
     [data-baseweb="radio"] div:first-child {{
         border-color: {OXXO_ROJO} !important;
     }}
+
+    /* Cajas de texto y selects redondeados, estilo barra de búsqueda */
+    [data-testid="stTextInput"] input,
+    [data-testid="stNumberInput"] input,
+    .stSelectbox div[data-baseweb="select"] > div {{
+        border-radius: 10px !important;
+    }}
+
+    /* Chips de leyenda (puntico de color + texto), en vez de texto plano */
+    .chip-leyenda {{
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: #FFFFFF;
+        border: 1px solid {OXXO_GRIS_BORDE};
+        border-radius: 999px;
+        padding: 4px 12px;
+        margin: 2px 6px 6px 0;
+        font-size: 13px;
+        color: {OXXO_TEXTO};
+    }}
+    .chip-leyenda .punto {{
+        width: 10px;
+        height: 10px;
+        min-width: 10px;
+        border-radius: 50%;
+        display: inline-block;
+    }}
+
+    /* Tarjeta de resultado (punto o generador encontrado en una búsqueda) */
+    .tarjeta-resultado {{
+        background: #FFFFFF;
+        border: 1px solid {OXXO_GRIS_BORDE};
+        border-radius: 14px;
+        padding: 14px 18px;
+        margin-bottom: 12px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    }}
+    .tarjeta-resultado .tarjeta-header {{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        flex-wrap: wrap;
+    }}
+    .tarjeta-resultado .titulo {{
+        font-size: 15.5px;
+        font-weight: 700;
+        color: {OXXO_TEXTO};
+    }}
+    .tarjeta-resultado .fila {{
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        font-size: 13.5px;
+        color: #4A4A4F;
+        margin-top: 7px;
+        line-height: 1.35;
+    }}
+    .tarjeta-resultado .fila.nota {{
+        font-style: italic;
+        color: #6B6B70;
+        border-top: 1px dashed {OXXO_GRIS_BORDE};
+        padding-top: 7px;
+    }}
+
+    /* Etiqueta de estado (badge), estilo "PENDIENTE" / "APROBADO" de la referencia */
+    .badge-estado {{
+        display: inline-block;
+        padding: 3px 12px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+        white-space: nowrap;
+    }}
+    .badge-aprobado {{ background: #DDF3E4; color: #1F7A3F; }}
+    .badge-tareas {{ background: #E0ECFB; color: #1E5FA8; }}
+    .badge-descartado {{ background: #FBE0E0; color: {OXXO_ROJO_OSCURO}; }}
+    .badge-pendiente {{ background: #FFF3CD; color: #8A6D1D; }}
+    .badge-neutral {{ background: {OXXO_GRIS_FONDO}; color: #6B6B70; border: 1px solid {OXXO_GRIS_BORDE}; }}
     </style>
     """,
     unsafe_allow_html=True,
 )
+
+
+# ---------------------------------------------------------------------------
+# Piezas visuales reutilizables: chips de leyenda y tarjetas de resultado
+# (inspiradas en la referencia de diseño que compartiste — mismos badges de
+# estado, filas con íconos, y colores por tipo de punto).
+# ---------------------------------------------------------------------------
+_COLORES_HEX_LEYENDA = {
+    "morado": "#7C3AA8",
+    "azul_claro": "#5DADE2",
+    "naranja": "#E67E22",
+    "rojo": "#E11E1E",
+    "azul_repetido": "#1955DC",
+    "gris": "#7F8C8D",
+}
+
+
+def chip_leyenda(color_key: str, texto: str) -> str:
+    """Una 'píldora' con un puntico de color + texto, para la leyenda del mapa."""
+    color_hex = _COLORES_HEX_LEYENDA.get(color_key, "#999999")
+    return (
+        f'<span class="chip-leyenda"><span class="punto" '
+        f'style="background:{color_hex}"></span>{texto}</span>'
+    )
+
+
+def _clase_badge_estado(estado: str) -> str:
+    e = (estado or "").strip().lower()
+    if "descart" in e:
+        return "badge-descartado"
+    if "tarea" in e:
+        return "badge-tareas"
+    if "aprob" in e:
+        return "badge-aprobado"
+    if not e:
+        return "badge-pendiente"
+    return "badge-neutral"
+
+
+def badge_estado_html(estado: str) -> str:
+    """Etiqueta de color según el estado de comité (o 'Pendiente' si está vacío)."""
+    texto = estado.strip() if estado and str(estado).strip() else "Pendiente"
+    return f'<span class="badge-estado {_clase_badge_estado(estado)}">{texto}</span>'
+
+
+def tarjeta_resultado_html(titulo: str, badge_html: str, filas: list, nota: str = None) -> str:
+    """
+    Arma una tarjeta de resultado estilo 'ficha' (título + badge de estado +
+    filas con íconos + nota opcional al final) — el mismo look de la
+    referencia que compartiste, adaptado a lo que Streamlit puede mostrar.
+    `filas` es una lista de tuplas (icono, texto_html).
+    """
+    filas_html = "".join(f'<div class="fila">{icono} {texto}</div>' for icono, texto in filas)
+    nota_html = f'<div class="fila nota">🔍 {nota}</div>' if nota else ""
+    return (
+        '<div class="tarjeta-resultado">'
+        '<div class="tarjeta-header">'
+        f'<span class="titulo">{titulo}</span>{badge_html}'
+        '</div>'
+        f'{filas_html}{nota_html}'
+        '</div>'
+    )
 
 
 def leer_metadata() -> dict:
@@ -408,22 +506,32 @@ def guardar_metadata(**campos) -> None:
     METADATA_PATH.write_text(json.dumps(actual))
 
 
-@st.cache_data(show_spinner="Descargando la versión más reciente del Excel...")
+# Cuánto tiempo se guarda en caché la última descarga antes de volver a
+# traer los datos solos, sin que nadie tenga que acordarse de darle clic a
+# "Actualizar". Antes no tenía límite de tiempo — por eso, si alguien
+# agregaba puntos nuevos al Excel de puente y nadie más le daba clic al
+# botón de actualizar, esos puntos nuevos se quedaban invisibles para
+# todo el mundo indefinidamente. Con esto, como mucho se puede quedar
+# desactualizado este rato; el botón sigue sirviendo para forzarlo al
+# instante.
+TTL_CACHE_DATOS = "10m"
+
+
+@st.cache_data(show_spinner="Descargando la versión más reciente del Excel...", ttl=TTL_CACHE_DATOS)
 def _leer_desde_url_cacheado(url: str):
     """
-    Envuelve leer_desde_url en caché de Streamlit. La caché NO expira sola
-    por tiempo: solo se refresca cuando el usuario le da clic al botón
-    "Actualizar ahora" (que llama a .clear()), para que la actualización
-    ocurra únicamente cuando se necesite y no en cada rato.
+    Envuelve leer_desde_url en caché de Streamlit. Se refresca sola cada
+    TTL_CACHE_DATOS, y también al instante si el usuario le da clic al
+    botón "Actualizar Excel de puente" (que llama a .clear()).
     """
     return leer_desde_url(url)
 
 
-@st.cache_data(show_spinner="Consultando la capa de generadores...")
+@st.cache_data(show_spinner="Consultando la capa de generadores...", ttl=TTL_CACHE_DATOS)
 def _leer_generadores_cacheado():
     """
-    Igual patrón que _leer_desde_url_cacheado: caché sin expiración por
-    tiempo, solo se refresca con el botón "Actualizar generadores".
+    Igual patrón que _leer_desde_url_cacheado: se refresca sola cada
+    TTL_CACHE_DATOS, y al instante con el botón "Actualizar generadores".
     """
     return leer_generadores_desde_arcgis()
 
@@ -446,53 +554,75 @@ try:
 except Exception:
     url_secreta = ""
 
-if "puntos" not in st.session_state:
-    if url_secreta:
-        try:
-            st.session_state.puntos = _leer_desde_url_cacheado(url_secreta)
-            cargado_desde_secret = True
-        except Exception as e:
-            # Si falla la descarga en vivo (p. ej. el link dejó de ser público),
-            # no se cae la app: se usa la última copia local guardada.
-            error_fuente_url = str(e)
-            st.session_state.puntos = cargar_puntos()
-    elif metadata.get("modo") == "url" and metadata.get("url_fuente"):
-        try:
-            st.session_state.puntos = _leer_desde_url_cacheado(metadata["url_fuente"])
-        except Exception as e:
-            # Si falla la descarga en vivo (p. ej. el link dejó de ser público),
-            # no se cae la app: se usa la última copia local guardada.
-            error_fuente_url = str(e)
-            st.session_state.puntos = cargar_puntos()
-    elif RUTA_EXCEL_BUNDLED.exists():
-        # Forma principal: el Excel viaja incluido en el proyecto y se lee
-        # solo, cada vez que se abre la app — igual que un "Book.xlsx".
-        try:
-            st.session_state.puntos = leer_archivo_fuente(
-                RUTA_EXCEL_BUNDLED, RUTA_EXCEL_BUNDLED.name
-            )
-            cargado_desde_bundle = True
-        except Exception as e:
-            error_fuente_url = f"No se pudo leer {RUTA_EXCEL_BUNDLED.name}: {e}"
-            st.session_state.puntos = cargar_puntos()
-    else:
+# IMPORTANTE: esto se vuelve a ejecutar en CADA carga de la página (no solo
+# la primera vez), a propósito. Antes solo se cargaba una vez por sesión
+# (guardado en session_state) y se quedaba pegado ahí — si alguien más
+# agregaba puntos nuevos al Excel de puente, esos puntos nuevos no
+# aparecían para nadie que ya tuviera la app abierta, ni para quien la
+# abriera de nuevo, hasta que alguien le diera clic manualmente al botón
+# de actualizar. Ahora, como _leer_desde_url_cacheado ya tiene su propia
+# caché con vencimiento (TTL_CACHE_DATOS), volver a llamarla aquí es
+# barato (la mayoría de las veces solo devuelve lo que ya tenía guardado)
+# pero garantiza que, como mucho, los datos se demoren ese rato en
+# aparecer solos — sin que nadie tenga que acordarse de nada.
+if url_secreta:
+    try:
+        df = _leer_desde_url_cacheado(url_secreta)
+        st.session_state.puntos = df
+        cargado_desde_secret = True
+    except Exception as e:
+        # Si falla la descarga en vivo (p. ej. el link dejó de ser público),
+        # no se cae la app: se usa la última copia que sí se pudo cargar.
+        error_fuente_url = str(e)
+        df = st.session_state.get("puntos")
+        if df is None:
+            df = cargar_puntos()
+        st.session_state.puntos = df
+elif metadata.get("modo") == "url" and metadata.get("url_fuente"):
+    try:
+        df = _leer_desde_url_cacheado(metadata["url_fuente"])
+        st.session_state.puntos = df
+    except Exception as e:
+        error_fuente_url = str(e)
+        df = st.session_state.get("puntos")
+        if df is None:
+            df = cargar_puntos()
+        st.session_state.puntos = df
+elif RUTA_EXCEL_BUNDLED.exists():
+    # Forma principal: el Excel viaja incluido en el proyecto y se lee
+    # solo, cada vez que se abre la app — igual que un "Book.xlsx". Para
+    # que esto refleje siempre lo último, hay que reemplazar este archivo
+    # en el repositorio de GitHub (no basta con editar el Excel en tu
+    # computador si no lo subes).
+    try:
+        df = leer_archivo_fuente(RUTA_EXCEL_BUNDLED, RUTA_EXCEL_BUNDLED.name)
+        st.session_state.puntos = df
+        cargado_desde_bundle = True
+    except Exception as e:
+        error_fuente_url = f"No se pudo leer {RUTA_EXCEL_BUNDLED.name}: {e}"
+        df = st.session_state.get("puntos")
+        if df is None:
+            df = cargar_puntos()
+        st.session_state.puntos = df
+else:
+    if "puntos" not in st.session_state:
         st.session_state.puntos = cargar_puntos()
-
-df = st.session_state.puntos
+    df = st.session_state.puntos
 
 if error_fuente_url:
     st.error(f"⚠️ {error_fuente_url} (se está mostrando la última copia guardada).", icon="⚠️")
 
 error_generadores = None
-if "generadores" not in st.session_state:
-    try:
-        st.session_state.generadores = _leer_generadores_cacheado()
-        guardar_generadores(st.session_state.generadores)
-    except Exception as e:
-        error_generadores = str(e)
-        st.session_state.generadores = cargar_generadores_cache()
-
-df_generadores = st.session_state.generadores
+try:
+    df_generadores = _leer_generadores_cacheado()
+    st.session_state.generadores = df_generadores
+    guardar_generadores(df_generadores)
+except Exception as e:
+    error_generadores = str(e)
+    df_generadores = st.session_state.get("generadores")
+    if df_generadores is None:
+        df_generadores = cargar_generadores_cache()
+    st.session_state.generadores = df_generadores
 
 # Vista agrupada de generadores (un renglón por generador único). Se
 # recalcula en cada carga de la página (es una operación rápida de pandas)
@@ -693,6 +823,34 @@ with tab1:
                     hide_index=True,
                 )
 
+                # También mostramos Google Maps + Street View del resultado
+                # elegido (por defecto, el más parecido — la primera fila).
+                con_coords_nombre = resultado_nombre.dropna(subset=["latitud", "longitud"])
+                if con_coords_nombre.empty:
+                    st.caption(
+                        "Ninguno de estos resultados tiene coordenadas registradas, "
+                        "así que no se puede mostrar el mapa ni Street View."
+                    )
+                else:
+                    opciones_nombre = {
+                        f"{row.local_identificado} · {row.especialista}": row.id
+                        for row in con_coords_nombre.itertuples()
+                    }
+                    etiqueta_nombre_elegida = st.selectbox(
+                        "Ver mapa y Street View de:", list(opciones_nombre.keys()),
+                        key="preview_resultado_nombre",
+                    )
+                    id_elegido = opciones_nombre[etiqueta_nombre_elegida]
+                    fila_elegida_nombre = con_coords_nombre[con_coords_nombre["id"] == id_elegido].iloc[0]
+                    lat_n, lon_n = fila_elegida_nombre["latitud"], fila_elegida_nombre["longitud"]
+                    col_mapa_n, col_calle_n = st.columns(2)
+                    with col_mapa_n:
+                        st.caption("Mapa")
+                        components.iframe(url_mapa_embed(lat_n, lon_n), height=300)
+                    with col_calle_n:
+                        st.caption("Street View")
+                        components.iframe(url_streetview_embed(lat_n, lon_n), height=300)
+
     elif modo_busqueda == "Por dirección":
         direccion_busqueda = st.text_input(
             "Escribe la dirección", key="direccion_busqueda_tab1",
@@ -790,21 +948,28 @@ with tab1:
                 icon="⚠️",
             )
             for _, row in cercanos.iterrows():
-                with st.container(border=True):
-                    cc1, cc2 = st.columns([3, 1])
-                    detalle_distancia = (
-                        f"{row['distancia_m']:.0f} m de distancia"
-                        if row["distancia_m"] != float("inf")
-                        else "sin coordenadas para comparar distancia"
-                    )
-                    cc1.markdown(
-                        f"**{row['local_identificado']}** — {detalle_distancia}, "
-                        f"registrado por **{row['especialista']}**"
-                        + (f" · practicante **{row['practicante']}**" if row.get("practicante") else "")
-                    )
-                    cc1.caption(f"{row['ciudad']} · Fecha: {row['fecha_registro']}")
-                    cc1.markdown(f"🔍 **Por qué se marca como posible duplicado:** {row['coincide_por']}")
-                    cc2.markdown(f"Comité: **{row['estado_comite'] or 'Pendiente'}**")
+                detalle_distancia = (
+                    f"A {row['distancia_m']:.0f} m de tu ubicación"
+                    if row["distancia_m"] != float("inf")
+                    else "Sin coordenadas para comparar distancia"
+                )
+                registrado_por = f"Registrado por <b>{row['especialista']}</b>"
+                if row.get("practicante"):
+                    registrado_por += f" · practicante <b>{row['practicante']}</b>"
+                filas_tarjeta = [
+                    ("👤", registrado_por),
+                    ("📅", f"Fecha de registro: {row['fecha_registro']}"),
+                    ("📍", f"{detalle_distancia} · {row['ciudad']}"),
+                ]
+                st.markdown(
+                    tarjeta_resultado_html(
+                        titulo=row["local_identificado"],
+                        badge_html=badge_estado_html(row["estado_comite"]),
+                        filas=filas_tarjeta,
+                        nota=f"Por qué se marca como posible duplicado: {row['coincide_por']}",
+                    ),
+                    unsafe_allow_html=True,
+                )
         else:
             st.success(
                 "✅ No se encontraron oportunidades cercanas registradas en "
@@ -903,11 +1068,6 @@ with tab2:
         "Survey123 — una por cada punto — sin que nadie lo note. Consulta "
         "aquí antes de registrar uno nuevo en campo."
     )
-    st.caption(
-        "🟠 **Naranja** = generador único &nbsp;·&nbsp; "
-        "🔵 **Azul** = generador repetido (dos o más registros a menos de "
-        f"{UMBRAL_DUPLICIDAD_GENERADOR_M:.0f} m entre sí)."
-    )
 
     col_espacio_gen, col_refrescar_gen = st.columns([5, 1.6])
     with col_refrescar_gen:
@@ -941,6 +1101,8 @@ with tab2:
     else:
         st.caption(f"📡 Conectado en vivo a la capa de Survey123 · {len(df_generadores)} registros cargados")
 
+        alertas_gen = generadores_agrupados[generadores_agrupados["cantidad_registros"] > 1].reset_index(drop=True)
+
         st.markdown("#### 🗺️ Mapa de generadores")
         modo_mapa_gen = st.radio(
             "¿Cuáles quieres ver?",
@@ -948,7 +1110,35 @@ with tab2:
             horizontal=True,
             key="modo_mapa_generadores",
         )
-        renderizar_mapa_generadores(generadores_agrupados, modo_mapa_gen, key="mapa_generadores_tab2")
+
+        punto_resaltado_gen = None
+        etiqueta_elegida_gen = "— Ver todos —"
+        if not alertas_gen.empty:
+            opciones_alerta = ["— Ver todos —"] + [
+                f"{row.nombre_generador or '(sin nombre)'} · {row.cantidad_registros}x"
+                for row in alertas_gen.itertuples()
+            ]
+            etiqueta_elegida_gen = st.selectbox(
+                "Elige un generador repetido de la tabla de abajo para verlo resaltado en el mapa:",
+                opciones_alerta,
+                key="generador_resaltado_tab2",
+            )
+            if etiqueta_elegida_gen != "— Ver todos —":
+                idx_elegido = opciones_alerta.index(etiqueta_elegida_gen) - 1
+                fila_elegida = alertas_gen.iloc[idx_elegido]
+                punto_resaltado_gen = (
+                    fila_elegida["latitud"], fila_elegida["longitud"], fila_elegida["nombre_generador"],
+                )
+
+        renderizar_mapa_generadores(
+            generadores_agrupados, modo_mapa_gen, key="mapa_generadores_tab2",
+            punto_resaltado=punto_resaltado_gen,
+        )
+
+        if punto_resaltado_gen is not None:
+            lat_g_sel, lon_g_sel, nombre_g_sel = punto_resaltado_gen
+            st.write(f"📍 **Street View de '{nombre_g_sel}':**")
+            components.iframe(url_streetview_embed(lat_g_sel, lon_g_sel), height=350)
 
         st.markdown("#### ⚠️ Alertas de duplicidad (radio de 300 m)")
         st.caption(
@@ -956,9 +1146,9 @@ with tab2:
             "MÁS DE UNA VEZ (probablemente por especialistas distintos, con "
             "nombres distintos, pero en el mismo lugar). La columna "
             "'nombre_generador' es el nombre representativo del grupo — no "
-            "significa que todos lo hayan escrito igual."
+            "significa que todos lo hayan escrito igual. Elígelo en la lista "
+            "de arriba del mapa para verlo resaltado."
         )
-        alertas_gen = generadores_agrupados[generadores_agrupados["cantidad_registros"] > 1]
         if alertas_gen.empty:
             st.success("No hay generadores repetidos por ahora.")
         else:
