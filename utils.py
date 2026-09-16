@@ -173,6 +173,25 @@ def _construir_detalle_microsaturacion(fila: pd.Series) -> str:
     return "; ".join(partes)
 
 
+# Hoja del Excel del área donde vive el "Estatus En Bitacora" real (columna
+# de estado de comité). El archivo puede traer varias hojas; si esta no
+# existe (por ejemplo, un CSV, o un archivo distinto), se usa la primera
+# hoja como respaldo en vez de fallar.
+HOJA_EXCEL_PREFERIDA = "ISO (2)"
+
+
+def _leer_excel_hoja_preferida(fuente) -> pd.DataFrame:
+    """Lee el Excel priorizando la hoja HOJA_EXCEL_PREFERIDA; si no existe, usa la primera hoja."""
+    try:
+        if hasattr(fuente, "seek"):
+            fuente.seek(0)
+        return pd.read_excel(fuente, sheet_name=HOJA_EXCEL_PREFERIDA)
+    except ValueError:
+        if hasattr(fuente, "seek"):
+            fuente.seek(0)
+        return pd.read_excel(fuente, sheet_name=0)
+
+
 def leer_archivo_fuente(ruta_o_buffer, nombre_archivo: str = "") -> pd.DataFrame:
     """
     Lee el Excel/CSV real del área ("Revisión Microsaturaciones...") y lo
@@ -195,7 +214,7 @@ def leer_archivo_fuente(ruta_o_buffer, nombre_archivo: str = "") -> pd.DataFrame
             engine="python",
         )
     else:
-        crudo = pd.read_excel(ruta_o_buffer)
+        crudo = _leer_excel_hoja_preferida(ruta_o_buffer)
 
     return _normalizar_crudo(crudo)
 
@@ -246,7 +265,7 @@ def leer_desde_url(url: str, timeout: int = 20) -> pd.DataFrame:
         )
 
     try:
-        crudo = pd.read_excel(io.BytesIO(resp.content))
+        crudo = _leer_excel_hoja_preferida(io.BytesIO(resp.content))
     except Exception as e:
         raise ValueError(f"El archivo descargado no se pudo leer como Excel: {e}") from e
 
@@ -760,24 +779,27 @@ def guardar_generadores(df: pd.DataFrame) -> None:
 
 def detectar_generadores_coincidentes(
     df_generadores: pd.DataFrame,
-    nombre: str,
     lat: float,
     lon: float,
+    nombre: str = "",
     umbral_m: float = UMBRAL_DUPLICIDAD_GENERADOR_M,
     umbral_similitud: float = UMBRAL_SIMILITUD_NOMBRE,
 ) -> pd.DataFrame:
     """
-    Busca, entre TODOS los registros de generadores (sin importar a qué
-    punto potencial estén asociados), aquellos que probablemente sean el
-    mismo lugar físico que el que se está por registrar: nombre parecido
-    Y a menos de `umbral_m` metros.
+    Busca generadores existentes a menos de `umbral_m` de una coordenada.
+
+    El nombre es OPCIONAL y solo se usa para mostrar qué tan parecido es
+    (columna similitud_nombre) — no se exige que coincida, porque dos
+    personas pueden nombrar el mismo generador físico distinto (ej.
+    "Conjunto Acanto" vs "Conjunto Residencial Acanto"). La cercanía por
+    coordenada es lo que manda para detectar duplicidad.
 
     Útil para consultar antes de registrar un generador nuevo en
-    Survey123: si ya existe algo parecido cerca, conviene vincularlo al
-    punto actual en vez de crear un registro nuevo.
+    Survey123: si ya existe algo cerca, conviene vincularlo al punto
+    actual en vez de crear un registro nuevo.
     """
     columnas_resultado = list(GENERADOR_COLUMNAS) + ["distancia_m", "similitud_nombre"]
-    if df_generadores.empty or not nombre or not nombre.strip():
+    if df_generadores.empty:
         return df_generadores.reindex(columns=columnas_resultado).iloc[0:0]
 
     con_coords = df_generadores.dropna(subset=["latitud", "longitud"]).copy()
@@ -787,13 +809,16 @@ def detectar_generadores_coincidentes(
     con_coords["distancia_m"] = con_coords.apply(
         lambda row: round(haversine_m(lat, lon, row["latitud"], row["longitud"]), 1), axis=1
     )
-    con_coords["similitud_nombre"] = con_coords["nombre_generador"].apply(
-        lambda x: round(similitud_nombre(nombre, x), 2)
-    )
+    nombre = (nombre or "").strip()
+    if nombre:
+        con_coords["similitud_nombre"] = con_coords["nombre_generador"].apply(
+            lambda x: round(similitud_nombre(nombre, x), 2)
+        )
+    else:
+        con_coords["similitud_nombre"] = 0.0
 
     coincidencias = con_coords[
-        (con_coords["distancia_m"] <= umbral_m)
-        & (con_coords["similitud_nombre"] >= umbral_similitud)
+        con_coords["distancia_m"] <= umbral_m
     ]
     return coincidencias.sort_values("distancia_m")[columnas_resultado]
 
@@ -802,12 +827,26 @@ def agrupar_generadores(
     df_generadores: pd.DataFrame,
     umbral_m: float = UMBRAL_DUPLICIDAD_GENERADOR_M,
     umbral_similitud: float = UMBRAL_SIMILITUD_NOMBRE,
+    df_puntos: pd.DataFrame = None,
 ) -> pd.DataFrame:
     """
     Agrupa los registros crudos de generadores que probablemente sean el
-    mismo lugar físico (nombre parecido + cercanos) en un solo renglón por
-    generador único, listando todos los puntos potenciales a los que
-    quedó vinculado.
+    mismo lugar físico (nombre parecido + cercanos, radio de 300 m) en un
+    solo renglón por generador único, listando todos los puntos
+    potenciales a los que quedó vinculado.
+
+    El agrupamiento se hace SOLO por cercanía (radio de `umbral_m`,
+    300 m por defecto) — no por nombre. Esto es a propósito: la misma
+    ubicación física puede quedar escrita con nombres distintos según
+    quién la registró (ej. "Conjunto Acanto" vs "Conjunto Residencial
+    Acanto"), así que exigir nombre parecido dejaba pasar duplicados
+    reales sin detectar. El parámetro `umbral_similitud` se conserva
+    solo por compatibilidad y ya no se usa para decidir el agrupamiento.
+
+    Si se pasa df_puntos (el DataFrame de puntos potenciales, con columnas
+    'local_identificado' y 'especialista'), también arma la columna
+    'especialistas_asociados': quiénes registraron cada uno de los puntos
+    vinculados a ese generador — así se ve quién duplicó qué.
 
     Es un agrupamiento voraz (greedy): recorre los registros uno por uno
     y los suma al primer grupo existente con el que calcen; si no calzan
@@ -817,11 +856,26 @@ def agrupar_generadores(
     """
     columnas = [
         "nombre_generador", "tipo_generador", "latitud", "longitud",
-        "cantidad_registros", "puntos_asociados",
+        "cantidad_registros", "puntos_asociados", "especialistas_asociados",
+        "upz_asociadas",
     ]
     con_coords = df_generadores.dropna(subset=["latitud", "longitud"]).copy()
     if con_coords.empty:
         return pd.DataFrame(columns=columnas)
+
+    # Mapa nombre-de-punto (normalizado) -> especialista / upz, para poder
+    # decir quién registró cada punto asociado a un generador repetido y en
+    # qué UPZ quedó cada uno (en vez de "colorear por UPZ", que no tiene
+    # mucho sentido acá porque un mismo generador puede quedar vinculado a
+    # puntos de UPZ distintas).
+    mapa_especialista_por_punto = {}
+    mapa_upz_por_punto = {}
+    if df_puntos is not None and not df_puntos.empty and "local_identificado" in df_puntos.columns:
+        for _, fp in df_puntos.iterrows():
+            clave = normalizar_texto(fp.get("local_identificado", ""))
+            if clave:
+                mapa_especialista_por_punto[clave] = str(fp.get("especialista", "")).strip()
+                mapa_upz_por_punto[clave] = str(fp.get("upz", "")).strip()
 
     grupos = []  # cada grupo: dict con nombre, tipo, lat, lon, registros (list of rows)
 
@@ -831,28 +885,34 @@ def agrupar_generadores(
         grupo_encontrado = None
         for grupo in grupos:
             distancia = haversine_m(lat, lon, grupo["latitud"], grupo["longitud"])
-            similitud = similitud_nombre(nombre, grupo["nombre_generador"])
-            if distancia <= umbral_m and similitud >= umbral_similitud:
+            if distancia <= umbral_m:
                 grupo_encontrado = grupo
                 break
 
-        if grupo_encontrado is not None:
-            grupo_encontrado["registros"].append(fila)
-            punto = str(fila.get("nombre_punto_potencial", "")).strip()
-            if punto and punto not in grupo_encontrado["puntos"]:
-                grupo_encontrado["puntos"].append(punto)
-        else:
-            punto = str(fila.get("nombre_punto_potencial", "")).strip()
-            grupos.append(
-                {
-                    "nombre_generador": nombre,
-                    "tipo_generador": fila.get("tipo_generador", ""),
-                    "latitud": lat,
-                    "longitud": lon,
-                    "registros": [fila],
-                    "puntos": [punto] if punto else [],
-                }
-            )
+        if grupo_encontrado is None:
+            grupo_encontrado = {
+                "nombre_generador": nombre,
+                "tipo_generador": fila.get("tipo_generador", ""),
+                "latitud": lat,
+                "longitud": lon,
+                "registros": [],
+                "puntos": [],
+                "especialistas": [],
+                "upz": [],
+            }
+            grupos.append(grupo_encontrado)
+
+        grupo_encontrado["registros"].append(fila)
+        punto = str(fila.get("nombre_punto_potencial", "")).strip()
+        if punto and punto not in grupo_encontrado["puntos"]:
+            grupo_encontrado["puntos"].append(punto)
+        clave_punto = normalizar_texto(punto)
+        especialista = mapa_especialista_por_punto.get(clave_punto, "")
+        if especialista and especialista not in grupo_encontrado["especialistas"]:
+            grupo_encontrado["especialistas"].append(especialista)
+        upz_punto = mapa_upz_por_punto.get(clave_punto, "")
+        if upz_punto and upz_punto not in grupo_encontrado["upz"]:
+            grupo_encontrado["upz"].append(upz_punto)
 
     resultado = pd.DataFrame(
         [
@@ -863,6 +923,8 @@ def agrupar_generadores(
                 "longitud": g["longitud"],
                 "cantidad_registros": len(g["registros"]),
                 "puntos_asociados": ", ".join(g["puntos"]) if g["puntos"] else "",
+                "especialistas_asociados": ", ".join(g["especialistas"]) if g["especialistas"] else "",
+                "upz_asociadas": ", ".join(g["upz"]) if g["upz"] else "",
             }
             for g in grupos
         ],
