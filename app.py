@@ -903,12 +903,18 @@ if modulo_activo.startswith("🔁"):
                 .sort_values("cantidad", ascending=False)
             )
 
-            def _dibujar_chart_fuente(datos, altura_fija=None):
-                if datos.empty:
-                    st.caption("Todavía no hay datos para graficar.")
-                    return
+            st.markdown(f"*{fuente_resumen}*")
+            if conteo_fuente.empty:
+                st.caption("Todavía no hay datos para graficar.")
+            else:
+                # Se muestran solo los 5 con más puntos, para que la
+                # gráfica quede compacta — si tiene más, usa el ícono de
+                # pantalla completa que trae la gráfica (arriba a la
+                # derecha, al pasar el mouse) para verla más grande y sin
+                # que los nombres queden cortados.
+                top5_fuente = conteo_fuente.head(5)
                 chart_fuente = (
-                    alt.Chart(datos)
+                    alt.Chart(top5_fuente)
                     .mark_bar(color=_COLORES_HEX_LEYENDA.get(color_resumen, OXXO_ROJO), cornerRadiusEnd=4)
                     .encode(
                         x=alt.X("cantidad:Q", title="Puntos"),
@@ -918,22 +924,11 @@ if modulo_activo.startswith("🔁"):
                             alt.Tooltip("cantidad:Q", title="Puntos"),
                         ],
                     )
-                    .properties(height=altura_fija if altura_fija else max(90, 24 * len(datos)))
+                    .properties(height=max(90, 26 * len(top5_fuente)))
                 )
                 st.altair_chart(chart_fuente, use_container_width=True)
-
-            st.markdown(f"*{fuente_resumen}*")
-            if fuente_resumen == "Operación" and len(conteo_fuente) > 8:
-                # La de Operación suele traer muchos responsables distintos
-                # y la gráfica sale muy alta — se deja un poco más pequeña
-                # por defecto (los 8 con más puntos) con la opción de verla
-                # completa abajo.
-                _dibujar_chart_fuente(conteo_fuente.head(8), altura_fija=200)
-                st.caption(f"Mostrando los 8 con más puntos, de {len(conteo_fuente)} responsables.")
-                with st.expander("Ver todos los responsables de Operación"):
-                    _dibujar_chart_fuente(conteo_fuente)
-            else:
-                _dibujar_chart_fuente(conteo_fuente)
+                if len(conteo_fuente) > 5:
+                    st.caption(f"Mostrando los 5 con más puntos, de {len(conteo_fuente)} responsables.")
 
     st.divider()
     st.subheader("Puntos potenciales")
