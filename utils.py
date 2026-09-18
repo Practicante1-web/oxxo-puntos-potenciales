@@ -1367,7 +1367,7 @@ def agrupar_generadores(
     columnas = [
         "nombre_generador", "tipo_generador", "latitud", "longitud",
         "cantidad_registros", "puntos_asociados", "especialistas_asociados",
-        "registrado_por", "duplicado_por", "nombre_duplicado",
+        "registrado_por", "duplicado_por", "nombre_duplicado", "registros_originales",
     ]
     con_coords = df_generadores.dropna(subset=["latitud", "longitud"]).copy()
     if incluir_solo_generadores and "tipo_levantamiento" in con_coords.columns:
@@ -1464,6 +1464,28 @@ def agrupar_generadores(
         otros = [n for n in g["nombres"] if normalizar_texto(n) != clave_repr]
         return ", ".join(otros) if otros else g["nombre_generador"]
 
+    def _registros_originales(g):
+        # La coordenada del grupo es UNA sola (representativa), pero cada
+        # registro crudo que quedó agrupado ahí tiene su propia coordenada
+        # real en Survey123 (puede variar unos metros). Esta lista permite
+        # mostrar en el mapa TODOS los puntos reales que se consideraron
+        # duplicados entre sí, no solo el representativo.
+        vistos = set()
+        salida = []
+        for r in g["registros"]:
+            clave = (round(float(r["latitud"]), 7), round(float(r["longitud"]), 7))
+            if clave in vistos:
+                continue
+            vistos.add(clave)
+            quien_r = str(r.get("localizador", "")).strip() or str(r.get("creador", "")).strip()
+            salida.append({
+                "nombre": str(r.get("nombre_generador", "")).strip() or "(sin nombre)",
+                "latitud": float(r["latitud"]),
+                "longitud": float(r["longitud"]),
+                "quien": quien_r,
+            })
+        return salida
+
     resultado = pd.DataFrame(
         [
             {
@@ -1477,6 +1499,7 @@ def agrupar_generadores(
                 "registrado_por": ", ".join(g["creadores"]) if g["creadores"] else "",
                 "duplicado_por": _duplicado_por(g),
                 "nombre_duplicado": _nombre_duplicado(g),
+                "registros_originales": _registros_originales(g),
             }
             for g in grupos
         ],
