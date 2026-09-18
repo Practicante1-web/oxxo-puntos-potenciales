@@ -108,16 +108,21 @@ def _capa_pines(d: pd.DataFrame, color_key: str, size: int = TAMANO_PIN_PX) -> p
 
 def _capa_texto_resaltados(resaltados):
     """
-    Etiqueta de texto (nombre) que aparece DIRECTAMENTE sobre el mapa para
-    cada punto resaltado (rojo) — así el nombre se ve de una vez, sin
-    tener que pasar el mouse por encima para ver el tooltip. Se usa sobre
-    todo cuando se resalta un PAR de posibles duplicados, para que se vea
-    de inmediato cuál es cuál.
+    Etiqueta de texto (nombre CORTO) que aparece DIRECTAMENTE sobre el
+    mapa para cada punto resaltado (rojo) — así el nombre se ve de una
+    vez, sin tener que pasar el mouse por encima. Se usa sobre todo
+    cuando se resalta un PAR de posibles duplicados, para que se vea de
+    inmediato cuál es cuál.
+
+    Cada elemento de `resaltados` puede traer un 4to valor opcional con
+    info extra para el tooltip (ver _resaltados_a_lista) — esta capa de
+    texto SIEMPRE usa solo el nombre corto (3er valor), nunca ese extra,
+    para no llenar el mapa de texto ilegible.
     """
     if not resaltados:
         return None
     d = pd.DataFrame(
-        [{"latitud": lat_h, "longitud": lon_h, "texto": str(etiqueta_h)} for lat_h, lon_h, etiqueta_h in resaltados]
+        [{"latitud": item[0], "longitud": item[1], "texto": str(item[2])} for item in resaltados]
     )
     # Nota: no se fijan get_text_anchor / get_alignment_baseline a mano —
     # pydeck convierte cualquier string de un prop "get_*" en un accesor
@@ -135,16 +140,27 @@ def _capa_texto_resaltados(resaltados):
 
 def _resaltados_a_lista(punto_resaltado):
     """
-    Normaliza punto_resaltado para aceptar tanto un único (lat, lon,
-    etiqueta) como una lista de varios — esto último se usa para mostrar
-    un PAR de posibles duplicados al mismo tiempo (por ejemplo, al hacer
-    clic en una fila de la tabla de duplicados).
+    Normaliza punto_resaltado para aceptar tanto un único punto como una
+    lista de varios — esto último se usa para mostrar un PAR de posibles
+    duplicados al mismo tiempo (por ejemplo, al hacer clic en una fila de
+    la tabla de duplicados). Cada punto es una tupla (lat, lon, etiqueta)
+    o, si se quiere mostrar info extra en el tooltip al pasar el mouse,
+    (lat, lon, etiqueta, info_extra).
     """
     if punto_resaltado is None:
         return []
-    if isinstance(punto_resaltado, tuple) and len(punto_resaltado) == 3 and not isinstance(punto_resaltado[0], (list, tuple)):
+    if isinstance(punto_resaltado, tuple) and len(punto_resaltado) in (3, 4) and not isinstance(punto_resaltado[0], (list, tuple)):
         return [punto_resaltado]
     return list(punto_resaltado)
+
+
+def _texto_tooltip_resaltado(item) -> str:
+    """Arma el texto del tooltip (al pasar el mouse) para un punto resaltado, incluyendo la info extra si se dio."""
+    etiqueta_h = item[2]
+    texto = f"🔎 {etiqueta_h}"
+    if len(item) > 3 and item[3]:
+        texto = texto + "\n" + str(item[3])
+    return texto
 
 
 def _columna_tooltip_fuente(d: pd.DataFrame) -> pd.Series:
@@ -211,7 +227,7 @@ def renderizar_mapa_general(df, fuentes_activas, punto_resaltado=None, key="mapa
     resaltados = _resaltados_a_lista(punto_resaltado)
     if resaltados:
         d = pd.DataFrame(
-            [{"latitud": lat_h, "longitud": lon_h, "tooltip_text": f"🔎 {etiqueta_h}"} for lat_h, lon_h, etiqueta_h in resaltados]
+            [{"latitud": item[0], "longitud": item[1], "tooltip_text": _texto_tooltip_resaltado(item)} for item in resaltados]
         )
         capas.append(_capa_pines(d, "rojo", size=TAMANO_PIN_RESALTADO_PX))
         _capa_texto = _capa_texto_resaltados(resaltados)
@@ -330,7 +346,7 @@ def renderizar_mapa_generadores(
 
     if resaltados:
         d_resaltado = pd.DataFrame(
-            [{"latitud": lat_h, "longitud": lon_h, "tooltip_text": f"🔎 {etiqueta_h}"} for lat_h, lon_h, etiqueta_h in resaltados]
+            [{"latitud": item[0], "longitud": item[1], "tooltip_text": _texto_tooltip_resaltado(item)} for item in resaltados]
         )
         capas.append(_capa_pines(d_resaltado, "rojo", size=TAMANO_PIN_RESALTADO_PX))
         _capa_texto_gen = _capa_texto_resaltados(resaltados)
@@ -1229,15 +1245,36 @@ if modulo_activo.startswith("🔁"):
         filas_sel_m1 = list(evento_dup_m1.selection.rows) if evento_dup_m1 is not None else []
         if filas_sel_m1:
             par = duplicados_m1.iloc[filas_sel_m1[0]]
+
+            def _info_extra_punto(id_punto):
+                # Trae toda la info del punto (especialista, cuándo se
+                # solicitó, practicante, etc.) para mostrarla al pasar el
+                # mouse sobre el pin resaltado en el mapa de abajo.
+                coincidencias_id = df[df["id"] == id_punto]
+                if coincidencias_id.empty:
+                    return ""
+                f = coincidencias_id.iloc[0]
+                return (
+                    f"Fuente: {f.get('fuente', '') or '—'}"
+                    f"\nEspecialista/responsable: {f.get('especialista', '') or '—'}"
+                    f"\nCuándo se solicitó: {f.get('fecha_registro', '') or '—'}"
+                    f"\nPracticante: {f.get('practicante', '') or '—'}"
+                    f"\nEstado: {f.get('estado', '') or '—'}"
+                )
+
             st.markdown(
-                f"**Mostrando en el mapa: '{par['nombre']}' y su posible "
-                f"duplicado '{par['nombre_duplicado']}'**"
+                f"**Mostrando en el mapa SOLO estos dos: '{par['nombre']}' y su "
+                f"posible duplicado '{par['nombre_duplicado']}'** — pasa el mouse "
+                "sobre cada pin para ver toda su información."
             )
             renderizar_mapa_general(
-                df, fuentes_activas=list(FUENTE_COLOR_ICONO.keys()),
+                df, fuentes_activas=[],
                 punto_resaltado=[
-                    (par["latitud"], par["longitud"], par["nombre"]),
-                    (par["latitud_duplicado"], par["longitud_duplicado"], par["nombre_duplicado"]),
+                    (par["latitud"], par["longitud"], par["nombre"], _info_extra_punto(par["id"])),
+                    (
+                        par["latitud_duplicado"], par["longitud_duplicado"], par["nombre_duplicado"],
+                        _info_extra_punto(par["id_duplicado"]),
+                    ),
                 ],
                 key="mapa_duplicado_m1_seleccionado",
             )
@@ -1528,16 +1565,20 @@ else:
             if filas_sel_gen:
                 parg = alertas_gen.iloc[filas_sel_gen[0]]
                 st.markdown(
-                    f"**Mostrando en el mapa: '{parg['nombre_generador']}' "
+                    f"**Mostrando en el mapa SOLO este: '{parg['nombre_generador']}' "
                     f"(repetido con '{parg['nombre_duplicado']}')**"
                 )
+                # mostrar=None: no dibuja la capa de "Repetidos" completa (todos
+                # los demás generadores repetidos de Bogotá) — solo el pin
+                # resaltado de este, para que no se llene el mapa de puntos
+                # que no tienen que ver con la fila que se seleccionó.
                 renderizar_mapa_generadores(
-                    generadores_agrupados, "Repetidos", key="mapa_generadores_seleccionado_alerta",
+                    generadores_agrupados, None, key="mapa_generadores_seleccionado_alerta",
                     punto_resaltado=(
-                        parg["latitud"], parg["longitud"],
-                        f"{parg['nombre_generador']} / {parg['nombre_duplicado']}",
+                        parg["latitud"], parg["longitud"], parg["nombre_generador"],
+                        f"Se repite con: {parg['nombre_duplicado']}\nCómo se detectó: {parg['duplicado_por']}",
                     ),
-                    df_potenciales_survey=df_potenciales_survey,
+                    df_potenciales_survey=None,
                 )
 
         st.divider()
