@@ -15,6 +15,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import altair as alt
 import pandas as pd
 import pydeck as pdk
 import streamlit as st
@@ -115,12 +116,13 @@ def _columna_tooltip_generadores(d: pd.DataFrame) -> pd.Series:
         "🏢 " + d["nombre_generador"].astype(str)
         + "\nTipo: " + d["tipo_generador"].astype(str)
         + "\nRegistros agrupados: " + d["cantidad_registros"].astype(str)
-        + "\nPuntos asociados: " + d["puntos_asociados"].astype(str)
     )
-    if "especialistas_asociados" in d.columns:
-        texto = texto + "\nEspecialista(s): " + d["especialistas_asociados"].replace("", "—").astype(str)
-    if "upz_asociadas" in d.columns:
-        texto = texto + "\nUPZ: " + d["upz_asociadas"].replace("", "—").astype(str)
+    if "registrado_por" in d.columns:
+        texto = texto + "\nRegistrado por: " + d["registrado_por"].replace("", "—").astype(str)
+    if "puntos_asociados" in d.columns:
+        texto = texto + "\nPuntos asociados: " + d["puntos_asociados"].replace("", "—").astype(str)
+    if "duplicado_por" in d.columns:
+        texto = texto + "\n¿Duplicado?: " + d["duplicado_por"].replace("", "No").astype(str)
     return texto
 
 
@@ -206,10 +208,31 @@ def mostrar_leyenda_colores(incluir_generadores=True, incluir_operacion=True, in
     st.markdown("".join(chips), unsafe_allow_html=True)
 
 
-def renderizar_mapa_generadores(df_generadores_agrupado, mostrar, key="mapa_generadores", punto_resaltado=None):
+def _columna_tooltip_potenciales(d: pd.DataFrame) -> pd.Series:
+    texto = "📍 Punto potencial (Survey123)"
+    if "nombre_punto_potencial" in d.columns:
+        texto = texto + "\nNombre: " + d["nombre_punto_potencial"].replace("", "—").astype(str)
+    if "localizador" in d.columns:
+        texto = texto + "\nLocalizador: " + d["localizador"].replace("", "—").astype(str)
+    if "fecha_creacion" in d.columns:
+        texto = texto + "\nFecha: " + d["fecha_creacion"].astype(str)
+    return texto
+
+
+def renderizar_mapa_generadores(
+    df_generadores_agrupado, mostrar, key="mapa_generadores", punto_resaltado=None,
+    df_potenciales_survey=None,
+):
     """
     Mapa de generadores, con la opción de mostrar "Todos" o solo los
     "Repetidos" (cantidad_registros > 1 — la señal de duplicidad).
+
+    Si se pasa df_potenciales_survey, se agrega SIEMPRE (sin importar el
+    filtro "Todos"/"Solo repetidos") una capa morada con los registros de
+    esa MISMA encuesta de Survey123 marcados como "Punto potencial" — para
+    que se vea toda la información del survey en un solo lugar, sin
+    mezclarse con los generadores. Esto vive SOLO en este mapa (Módulo 2);
+    el mapa combinado de Módulo 1 no la incluye.
 
     Si se pasa punto_resaltado=(lat, lon, etiqueta) — por ejemplo, al elegir
     un generador repetido de la tabla de alertas — se agrega un marcador
@@ -224,22 +247,33 @@ def renderizar_mapa_generadores(df_generadores_agrupado, mostrar, key="mapa_gene
     d = df_generadores_agrupado.dropna(subset=["latitud", "longitud"]).copy().reset_index(drop=True)
     if mostrar == "Solo repetidos":
         d = d[d["cantidad_registros"] > 1].reset_index(drop=True)
-    if d.empty:
+
+    hay_generadores = not d.empty
+    hay_potenciales = df_potenciales_survey is not None and not df_potenciales_survey.empty
+    if not hay_generadores and not hay_potenciales:
         st.info("No hay generadores para mostrar con esa selección.")
         return
 
-    d["tooltip_text"] = _columna_tooltip_generadores(d)
-    d["icon_data"] = d["cantidad_registros"].apply(
-        lambda n: icon_data("azul_repetido" if n > 1 else "naranja", TAMANO_PIN_PX)
-    )
-    capas = [
-        pdk.Layer(
-            "IconLayer", data=d, get_position="[longitud, latitud]",
-            get_icon="icon_data", get_size=TAMANO_PIN_PX, size_units="pixels",
-            size_min_pixels=TAMANO_PIN_PX - 10, size_max_pixels=TAMANO_PIN_PX + 16,
-            pickable=True,
+    capas = []
+
+    if hay_generadores:
+        d["tooltip_text"] = _columna_tooltip_generadores(d)
+        d["icon_data"] = d["cantidad_registros"].apply(
+            lambda n: icon_data("azul_repetido" if n > 1 else "naranja", TAMANO_PIN_PX)
         )
-    ]
+        capas.append(
+            pdk.Layer(
+                "IconLayer", data=d, get_position="[longitud, latitud]",
+                get_icon="icon_data", get_size=TAMANO_PIN_PX, size_units="pixels",
+                size_min_pixels=TAMANO_PIN_PX - 10, size_max_pixels=TAMANO_PIN_PX + 16,
+                pickable=True,
+            )
+        )
+
+    if hay_potenciales:
+        dp = df_potenciales_survey.dropna(subset=["latitud", "longitud"]).copy().reset_index(drop=True)
+        dp["tooltip_text"] = _columna_tooltip_potenciales(dp)
+        capas.append(_capa_pines(dp, "gris", size=TAMANO_PIN_PX))
 
     if punto_resaltado is not None:
         lat_h, lon_h, etiqueta_h = punto_resaltado
@@ -256,10 +290,12 @@ def renderizar_mapa_generadores(df_generadores_agrupado, mostrar, key="mapa_gene
 
     chips_gen = [
         chip_leyenda("naranja", "Generador único"),
-        chip_leyenda("azul_repetido", f"Generador repetido (radio de {UMBRAL_DUPLICIDAD_GENERADOR_M:.0f} m)"),
+        chip_leyenda("azul_repetido", f"Generador repetido (¿duplicado? ver tabla de abajo)"),
     ]
+    if hay_potenciales:
+        chips_gen.append(chip_leyenda("gris", "Punto potencial (mismo survey, informativo)"))
     if punto_resaltado is not None:
-        chips_gen.append(chip_leyenda("rojo", "El que elegiste de la tabla"))
+        chips_gen.append(chip_leyenda("rojo", "El que elegiste en el buscador"))
     st.markdown("".join(chips_gen), unsafe_allow_html=True)
 
 
@@ -1103,11 +1139,33 @@ with tab2:
 
         alertas_gen = generadores_agrupados[generadores_agrupados["cantidad_registros"] > 1].reset_index(drop=True)
 
+        # Esta misma encuesta de Survey123 trae dos tipos de respuesta
+        # ("tipo_de_levantamiento"): "Generador" y "Punto potencial". Se
+        # muestran los dos en el mapa (con colores distintos), pero las
+        # cuentas de duplicidad/agrupamiento solo aplican a los
+        # "Generador" — un "Punto potencial" no es un generador.
+        if "tipo_levantamiento" in df_generadores.columns:
+            es_potencial = df_generadores["tipo_levantamiento"].astype(str).str.strip().str.lower() == "punto potencial"
+            registros_generador = int((~es_potencial).sum())
+            registros_punto_potencial = int(es_potencial.sum())
+            df_potenciales_survey = df_generadores[es_potencial].dropna(subset=["latitud", "longitud"])
+        else:
+            registros_generador = len(df_generadores)
+            registros_punto_potencial = 0
+            df_potenciales_survey = df_generadores.iloc[0:0]
+
         with st.container(border=True):
-            mc1, mc2, mc3 = st.columns(3)
-            mc1.metric("🏢 Generadores (únicos)", len(generadores_agrupados))
-            mc2.metric("📋 Registros en Survey123", len(df_generadores))
-            mc3.metric("⚠️ Con duplicidad", len(alertas_gen))
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("📋 Registros en Survey123", len(df_generadores))
+            mc2.metric("🏢 Generadores (únicos)", len(generadores_agrupados))
+            mc3.metric("📍 Puntos potenciales", registros_punto_potencial)
+            mc4.metric("⚠️ Con duplicidad", len(alertas_gen))
+        st.caption(
+            f"De los {len(df_generadores)} registros: {registros_generador} son tipo "
+            f"'Generador' y {registros_punto_potencial} son tipo 'Punto potencial' "
+            "(misma encuesta, pero no es un generador — se muestran en gris en el "
+            "mapa, solo aquí en Módulo 2, informativos)."
+        )
 
         st.markdown("#### 🗺️ Mapa de generadores")
         modo_mapa_gen = st.radio(
@@ -1117,43 +1175,84 @@ with tab2:
             key="modo_mapa_generadores",
         )
 
+        # Buscador de CUALQUIER generador (no solo los repetidos) — al
+        # elegir uno se resalta en el mapa y se muestra toda su info +
+        # Street View abajo. (Nota: se probó antes hacer esto con clic
+        # directo sobre el mapa, pero esa función de Streamlit llegó a
+        # dejar el mapa en blanco, así que se hace eligiendo de una lista,
+        # que es más confiable — y el selector ya deja escribir para
+        # filtrar mientras se busca.)
+        gen_ordenados = generadores_agrupados.sort_values("nombre_generador").reset_index(drop=True)
+        opciones_todos = ["— Ninguno —"] + [
+            f"{row.nombre_generador or '(sin nombre)'}"
+            + (f" · repetido {row.cantidad_registros}x" if row.cantidad_registros > 1 else "")
+            for row in gen_ordenados.itertuples()
+        ]
+        etiqueta_elegida_gen = st.selectbox(
+            "🔎 Busca un generador para ver toda su información (empieza a escribir el nombre):",
+            opciones_todos,
+            key="generador_resaltado_tab2",
+        )
+
         punto_resaltado_gen = None
-        etiqueta_elegida_gen = "— Ver todos —"
-        if not alertas_gen.empty:
-            opciones_alerta = ["— Ver todos —"] + [
-                f"{row.nombre_generador or '(sin nombre)'} · {row.cantidad_registros}x"
-                for row in alertas_gen.itertuples()
-            ]
-            etiqueta_elegida_gen = st.selectbox(
-                "Elige un generador repetido de la tabla de abajo para verlo resaltado en el mapa:",
-                opciones_alerta,
-                key="generador_resaltado_tab2",
+        fila_elegida = None
+        if etiqueta_elegida_gen != "— Ninguno —":
+            idx_elegido = opciones_todos.index(etiqueta_elegida_gen) - 1
+            fila_elegida = gen_ordenados.iloc[idx_elegido]
+            punto_resaltado_gen = (
+                fila_elegida["latitud"], fila_elegida["longitud"], fila_elegida["nombre_generador"],
             )
-            if etiqueta_elegida_gen != "— Ver todos —":
-                idx_elegido = opciones_alerta.index(etiqueta_elegida_gen) - 1
-                fila_elegida = alertas_gen.iloc[idx_elegido]
-                punto_resaltado_gen = (
-                    fila_elegida["latitud"], fila_elegida["longitud"], fila_elegida["nombre_generador"],
-                )
 
         renderizar_mapa_generadores(
             generadores_agrupados, modo_mapa_gen, key="mapa_generadores_tab2",
             punto_resaltado=punto_resaltado_gen,
+            df_potenciales_survey=df_potenciales_survey,
         )
 
-        if punto_resaltado_gen is not None:
-            lat_g_sel, lon_g_sel, nombre_g_sel = punto_resaltado_gen
-            st.write(f"📍 **Street View de '{nombre_g_sel}':**")
-            components.iframe(url_streetview_embed(lat_g_sel, lon_g_sel), height=350)
+        if fila_elegida is not None:
+            es_duplicado = bool(fila_elegida["duplicado_por"])
+            col_info, col_street = st.columns([1, 1])
+            with col_info:
+                st.markdown(
+                    tarjeta_resultado_html(
+                        titulo=fila_elegida["nombre_generador"] or "(sin nombre)",
+                        badge_html=(
+                            f'<span class="badge-estado badge-descartado">⚠️ Duplicado — {fila_elegida["duplicado_por"]}</span>'
+                            if es_duplicado
+                            else '<span class="badge-estado badge-aprobado">Único</span>'
+                        ),
+                        filas=[
+                            ("🏷️", f"Tipo: {fila_elegida['tipo_generador'] or '—'}"),
+                            ("👤", f"Registrado por: {fila_elegida['registrado_por'] or '—'}"),
+                            ("📍", f"Coordenadas: {fila_elegida['latitud']:.6f}, {fila_elegida['longitud']:.6f}"),
+                            ("📋", f"Registros agrupados: {fila_elegida['cantidad_registros']}"),
+                            ("🔗", f"Puntos potenciales asociados: {fila_elegida['puntos_asociados'] or '—'}"),
+                        ],
+                    ),
+                    unsafe_allow_html=True,
+                )
+            with col_street:
+                st.write(f"📍 **Street View de '{fila_elegida['nombre_generador'] or '(sin nombre)'}':**")
+                components.iframe(
+                    url_streetview_embed(fila_elegida["latitud"], fila_elegida["longitud"]),
+                    width=420, height=420,
+                )
 
-        st.markdown("#### ⚠️ Alertas de duplicidad (radio de 300 m)")
+        st.markdown("#### ⚠️ Alertas de duplicidad")
         st.caption(
             "Cada fila de aquí abajo es un generador que quedó registrado "
-            "MÁS DE UNA VEZ (probablemente por especialistas distintos, con "
-            "nombres distintos, pero en el mismo lugar). La columna "
-            "'nombre_generador' es el nombre representativo del grupo — no "
-            "significa que todos lo hayan escrito igual. Elígelo en la lista "
-            "de arriba del mapa para verlo resaltado."
+            "MÁS DE UNA VEZ. La columna 'Cómo se detectó' dice por qué se "
+            "considera duplicado: **'Coordenada casi exacta'** = quedó "
+            "marcado prácticamente en el mismo punto del mapa (≤ 15 m), "
+            "sin importar el nombre; **'Cercanía + nombre parecido'** = "
+            "está dentro del radio de recolección (300 m) Y el nombre se "
+            "parece — dos generadores distintos que están cerca pero con "
+            "nombres muy diferentes (ej. un banco y un colegio en la misma "
+            "cuadra) NO se cuentan como duplicado. La columna "
+            "'Generador' es el nombre representativo del grupo — no "
+            "significa que todos lo hayan escrito igual. Búscalo en el "
+            "buscador de arriba para verlo resaltado en el mapa y ver toda "
+            "su info."
         )
         if alertas_gen.empty:
             st.success("No hay generadores repetidos por ahora.")
@@ -1163,18 +1262,124 @@ with tab2:
                 alertas_gen[
                     [
                         "nombre_generador", "tipo_generador", "cantidad_registros",
-                        "puntos_asociados", "especialistas_asociados",
+                        "duplicado_por", "latitud", "longitud",
+                        "registrado_por", "puntos_asociados",
                     ]
                 ].rename(columns={
                     "nombre_generador": "Generador (repetido)",
                     "tipo_generador": "Tipo",
                     "cantidad_registros": "Veces registrado",
+                    "duplicado_por": "Cómo se detectó",
+                    "latitud": "Latitud",
+                    "longitud": "Longitud",
+                    "registrado_por": "Registrado por",
                     "puntos_asociados": "Puntos potenciales asociados",
-                    "especialistas_asociados": "Especialistas que lo repitieron",
                 }),
                 use_container_width=True,
                 hide_index=True,
             )
+
+        st.divider()
+        st.markdown("#### 📊 Gráficas de la capa de generadores")
+        st.caption(
+            "Basadas solo en registros con tipo de levantamiento "
+            "'Generador' (se excluyen los 'Punto potencial' de la misma "
+            "encuesta)."
+        )
+
+        df_gen_solo = df_generadores.copy()
+        if "tipo_levantamiento" in df_gen_solo.columns:
+            df_gen_solo = df_gen_solo[
+                df_gen_solo["tipo_levantamiento"].astype(str).str.strip().str.lower() != "punto potencial"
+            ]
+
+        col_g1, col_g2 = st.columns(2)
+
+        # Quién hizo cada registro: se prefiere 'localizador' (nombre que
+        # la persona escribe en el formulario de Survey123) sobre
+        # 'creador' (la cuenta de inicio de sesión, que puede ser genérica
+        # o compartida entre varias personas).
+        df_gen_solo["quien"] = (
+            df_gen_solo.get("localizador", "").astype(str).str.strip()
+        )
+        if "creador" in df_gen_solo.columns:
+            df_gen_solo["quien"] = df_gen_solo["quien"].where(
+                df_gen_solo["quien"] != "", df_gen_solo["creador"].astype(str).str.strip()
+            )
+
+        with col_g1:
+            st.markdown("**👤 Generadores registrados por persona (localizador)**")
+            por_creador = (
+                df_gen_solo[df_gen_solo["quien"].astype(str).str.strip() != ""]
+                .groupby("quien").size().reset_index(name="cantidad")
+                .sort_values("cantidad", ascending=False)
+            )
+            if por_creador.empty:
+                st.info("No hay datos de quién registró cada uno.")
+            else:
+                chart_creador = (
+                    alt.Chart(por_creador)
+                    .mark_bar(color=OXXO_ROJO, cornerRadiusEnd=4)
+                    .encode(
+                        x=alt.X("cantidad:Q", title="Generadores registrados"),
+                        y=alt.Y("quien:N", title=None, sort="-x"),
+                        tooltip=[
+                            alt.Tooltip("quien:N", title="Persona (localizador)"),
+                            alt.Tooltip("cantidad:Q", title="Generadores"),
+                        ],
+                    )
+                    .properties(height=max(120, 28 * len(por_creador)))
+                )
+                st.altair_chart(chart_creador, use_container_width=True)
+
+        with col_g2:
+            st.markdown("**📅 Registros por día (últimos 30 días con actividad)**")
+            df_fechas = df_gen_solo.dropna(subset=["fecha_creacion"]).copy()
+            if df_fechas.empty:
+                st.info("No hay fechas de registro disponibles.")
+            else:
+                df_fechas["fecha_creacion"] = pd.to_datetime(df_fechas["fecha_creacion"])
+                por_dia = (
+                    df_fechas.groupby("fecha_creacion").size().reset_index(name="cantidad")
+                    .sort_values("fecha_creacion")
+                )
+                por_dia_reciente = por_dia.tail(30)
+                chart_dia = (
+                    alt.Chart(por_dia_reciente)
+                    .mark_bar(color=OXXO_ROJO, cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+                    .encode(
+                        x=alt.X("fecha_creacion:T", title="Fecha"),
+                        y=alt.Y("cantidad:Q", title="Registrados ese día"),
+                        tooltip=[
+                            alt.Tooltip("fecha_creacion:T", title="Fecha"),
+                            alt.Tooltip("cantidad:Q", title="Registros"),
+                        ],
+                    )
+                    .properties(height=220)
+                )
+                st.altair_chart(chart_dia, use_container_width=True)
+
+        st.markdown("**📈 Total acumulado en el tiempo (cuántos llevan hasta cada día)**")
+        if not df_fechas.empty:
+            por_dia_todo = (
+                df_fechas.groupby("fecha_creacion").size().reset_index(name="cantidad")
+                .sort_values("fecha_creacion")
+            )
+            por_dia_todo["acumulado"] = por_dia_todo["cantidad"].cumsum()
+            chart_acum = (
+                alt.Chart(por_dia_todo)
+                .mark_line(color=OXXO_ROJO, point=alt.OverlayMarkDef(color=OXXO_ROJO, size=25))
+                .encode(
+                    x=alt.X("fecha_creacion:T", title="Fecha"),
+                    y=alt.Y("acumulado:Q", title="Total acumulado"),
+                    tooltip=[
+                        alt.Tooltip("fecha_creacion:T", title="Fecha"),
+                        alt.Tooltip("acumulado:Q", title="Total acumulado a esa fecha"),
+                    ],
+                )
+                .properties(height=260)
+            )
+            st.altair_chart(chart_acum, use_container_width=True)
 
         st.divider()
         st.markdown("#### Consultar antes de registrar un generador nuevo")
