@@ -106,6 +106,33 @@ def _capa_pines(d: pd.DataFrame, color_key: str, size: int = TAMANO_PIN_PX) -> p
     )
 
 
+def _capa_texto_resaltados(resaltados):
+    """
+    Etiqueta de texto (nombre) que aparece DIRECTAMENTE sobre el mapa para
+    cada punto resaltado (rojo) — así el nombre se ve de una vez, sin
+    tener que pasar el mouse por encima para ver el tooltip. Se usa sobre
+    todo cuando se resalta un PAR de posibles duplicados, para que se vea
+    de inmediato cuál es cuál.
+    """
+    if not resaltados:
+        return None
+    d = pd.DataFrame(
+        [{"latitud": lat_h, "longitud": lon_h, "texto": str(etiqueta_h)} for lat_h, lon_h, etiqueta_h in resaltados]
+    )
+    # Nota: no se fijan get_text_anchor / get_alignment_baseline a mano —
+    # pydeck convierte cualquier string de un prop "get_*" en un accesor
+    # por fila (para leer columnas de los datos), así que un valor
+    # constante como "middle" terminaría interpretado como el nombre de
+    # una columna en vez de como texto fijo. Los valores por defecto de
+    # TextLayer (centrado) ya son razonables sin tocarlos.
+    return pdk.Layer(
+        "TextLayer", data=d, get_position="[longitud, latitud]",
+        get_text="texto", get_size=15, get_color=[20, 20, 20, 255],
+        get_pixel_offset=[0, -26],
+        pickable=False,
+    )
+
+
 def _resaltados_a_lista(punto_resaltado):
     """
     Normaliza punto_resaltado para aceptar tanto un único (lat, lon,
@@ -187,6 +214,9 @@ def renderizar_mapa_general(df, fuentes_activas, punto_resaltado=None, key="mapa
             [{"latitud": lat_h, "longitud": lon_h, "tooltip_text": f"🔎 {etiqueta_h}"} for lat_h, lon_h, etiqueta_h in resaltados]
         )
         capas.append(_capa_pines(d, "rojo", size=TAMANO_PIN_RESALTADO_PX))
+        _capa_texto = _capa_texto_resaltados(resaltados)
+        if _capa_texto is not None:
+            capas.append(_capa_texto)
         if len(resaltados) == 1:
             vista = pdk.ViewState(latitude=resaltados[0][0], longitude=resaltados[0][1], zoom=15)
         else:
@@ -221,13 +251,23 @@ def mostrar_leyenda_fuentes(incluir_resaltado=False):
     st.markdown("".join(chips), unsafe_allow_html=True)
 
 
-def tabla_leyenda_fuentes_html() -> str:
-    """Tablita (no solo chips) con el color de cada fuente — para que quede clarísimo qué color es qué."""
+def tabla_leyenda_fuentes_html(incluir_resaltado: bool = False) -> str:
+    """
+    Tablita (no solo chips) con el color de cada fuente — para que quede
+    clarísimo qué color es qué. Si incluir_resaltado=True, agrega una fila
+    extra "Búsqueda" en rojo — el mismo color del puntero que se muestra
+    cuando se consulta o se busca un punto.
+    """
     filas = "".join(
         f'<tr><td><span class="punto-leyenda" style="background:{_COLORES_HEX_LEYENDA.get(color, "#999999")}"></span></td>'
         f'<td>{fuente}</td></tr>'
         for fuente, color in FUENTE_COLOR_ICONO.items()
     )
+    if incluir_resaltado:
+        filas += (
+            f'<tr><td><span class="punto-leyenda" style="background:{_COLORES_HEX_LEYENDA.get("rojo", "#E11E1E")}"></span></td>'
+            f'<td><b>BÚSQUEDA</b></td></tr>'
+        )
     return f'<table class="tabla-leyenda"><tbody>{filas}</tbody></table>'
 
 
@@ -293,6 +333,9 @@ def renderizar_mapa_generadores(
             [{"latitud": lat_h, "longitud": lon_h, "tooltip_text": f"🔎 {etiqueta_h}"} for lat_h, lon_h, etiqueta_h in resaltados]
         )
         capas.append(_capa_pines(d_resaltado, "rojo", size=TAMANO_PIN_RESALTADO_PX))
+        _capa_texto_gen = _capa_texto_resaltados(resaltados)
+        if _capa_texto_gen is not None:
+            capas.append(_capa_texto_gen)
         if len(resaltados) == 1:
             vista = pdk.ViewState(latitude=resaltados[0][0], longitude=resaltados[0][1], zoom=16)
         else:
@@ -818,49 +861,51 @@ if sin_coords:
     )
 
 # ---------------------------------------------------------------------------
-# Resumen general — total de puntos potenciales + gráfica por especialista
-# (siempre visible arriba, sin importar el módulo elegido en el sidebar).
+# MÓDULO 1 · Puntos potenciales
 # ---------------------------------------------------------------------------
-st.markdown("#### Resumen general de puntos potenciales")
-col_resumen1, col_resumen2 = st.columns([1, 2])
-with col_resumen1:
+if modulo_activo.startswith("🔁"):
+    # Resumen general — total de puntos potenciales + una gráfica pequeña
+    # por cada fuente (para que no salga una sola gráfica gigante). Este
+    # resumen vive SOLO en Módulo 1.
+    st.markdown("#### Resumen general de puntos potenciales")
     st.metric("Total de puntos potenciales (todas las fuentes)", len(df))
     resumen_fuente = (
         df["fuente"].replace("", "Sin fuente").value_counts()
         .rename_axis("Fuente").reset_index(name="Cantidad")
     )
     st.dataframe(resumen_fuente, hide_index=True, use_container_width=True)
-with col_resumen2:
-    st.markdown("**Puntos registrados por especialista**")
-    df_con_especialista = df[df["especialista"].astype(str).str.strip() != ""]
-    por_especialista = (
-        df_con_especialista.groupby("especialista").size().reset_index(name="cantidad")
-        .sort_values("cantidad", ascending=False)
-    )
-    if por_especialista.empty:
-        st.info("Todavía no hay datos de especialista para graficar.")
-    else:
-        chart_especialista = (
-            alt.Chart(por_especialista)
-            .mark_bar(color=OXXO_ROJO, cornerRadiusEnd=4)
-            .encode(
-                x=alt.X("cantidad:Q", title="Puntos potenciales registrados"),
-                y=alt.Y("especialista:N", title=None, sort="-x"),
-                tooltip=[
-                    alt.Tooltip("especialista:N", title="Especialista / responsable"),
-                    alt.Tooltip("cantidad:Q", title="Puntos"),
-                ],
+
+    st.markdown("**Puntos registrados por responsable, en cada fuente**")
+    cols_resumen_fuente = st.columns(2)
+    for i_fuente, (fuente_resumen, color_resumen) in enumerate(FUENTE_COLOR_ICONO.items()):
+        with cols_resumen_fuente[i_fuente % 2]:
+            st.markdown(f"*{fuente_resumen}*")
+            sub_fuente = df[
+                (df["fuente"] == fuente_resumen) & (df["especialista"].astype(str).str.strip() != "")
+            ]
+            conteo_fuente = (
+                sub_fuente.groupby("especialista").size().reset_index(name="cantidad")
+                .sort_values("cantidad", ascending=False)
             )
-            .properties(height=max(140, 26 * len(por_especialista)))
-        )
-        st.altair_chart(chart_especialista, use_container_width=True)
+            if conteo_fuente.empty:
+                st.caption("Todavía no hay datos para graficar.")
+            else:
+                chart_fuente = (
+                    alt.Chart(conteo_fuente)
+                    .mark_bar(color=_COLORES_HEX_LEYENDA.get(color_resumen, OXXO_ROJO), cornerRadiusEnd=4)
+                    .encode(
+                        x=alt.X("cantidad:Q", title="Puntos"),
+                        y=alt.Y("especialista:N", title=None, sort="-x"),
+                        tooltip=[
+                            alt.Tooltip("especialista:N", title="Especialista / responsable"),
+                            alt.Tooltip("cantidad:Q", title="Puntos"),
+                        ],
+                    )
+                    .properties(height=max(90, 24 * len(conteo_fuente)))
+                )
+                st.altair_chart(chart_fuente, use_container_width=True)
 
-st.divider()
-
-# ---------------------------------------------------------------------------
-# MÓDULO 1 · Puntos potenciales
-# ---------------------------------------------------------------------------
-if modulo_activo.startswith("🔁"):
+    st.divider()
     st.subheader("Puntos potenciales")
     st.write(
         "Revisa qué puntos potenciales — de especialistas, operación, "
@@ -1000,7 +1045,7 @@ if modulo_activo.startswith("🔁"):
             punto_resaltado=(lat_c, lon_c, consulta_punto["etiqueta"]),
             key="mapa_revisar_punto",
         )
-        mostrar_leyenda_fuentes(incluir_resaltado=True)
+        st.markdown(tabla_leyenda_fuentes_html(incluir_resaltado=True), unsafe_allow_html=True)
 
         if not cercanos.empty:
             st.warning(
@@ -1113,7 +1158,10 @@ if modulo_activo.startswith("🔁"):
         punto_resaltado=punto_resaltado_mapa,
         key="mapa_general_tab1",
     )
-    st.markdown(tabla_leyenda_fuentes_html(), unsafe_allow_html=True)
+    st.markdown(
+        tabla_leyenda_fuentes_html(incluir_resaltado=bool(punto_resaltado_mapa)),
+        unsafe_allow_html=True,
+    )
 
     st.markdown("**🔎 Ver info y Street View de un punto del mapa**")
     st.caption(
@@ -1279,6 +1327,50 @@ if modulo_activo.startswith("🔁"):
 # MÓDULO 2 · Generadores
 # ---------------------------------------------------------------------------
 else:
+    # Esta gráfica va primero (antes que todo lo demás) — a diferencia del
+    # resumen de Módulo 1, esta vive SOLO en Módulo 2.
+    st.markdown("#### 📊 Generadores registrados por persona (localizador)")
+
+    df_gen_solo = df_generadores.copy()
+    if "tipo_levantamiento" in df_gen_solo.columns:
+        df_gen_solo = df_gen_solo[
+            df_gen_solo["tipo_levantamiento"].astype(str).str.strip().str.lower() != "punto potencial"
+        ]
+
+    # Quién hizo cada registro: se prefiere 'localizador' (nombre que la
+    # persona escribe en el formulario de Survey123) sobre 'creador' (la
+    # cuenta de inicio de sesión, que puede ser genérica o compartida
+    # entre varias personas).
+    df_gen_solo["quien"] = df_gen_solo.get("localizador", "").astype(str).str.strip()
+    if "creador" in df_gen_solo.columns:
+        df_gen_solo["quien"] = df_gen_solo["quien"].where(
+            df_gen_solo["quien"] != "", df_gen_solo["creador"].astype(str).str.strip()
+        )
+
+    por_creador = (
+        df_gen_solo[df_gen_solo["quien"].astype(str).str.strip() != ""]
+        .groupby("quien").size().reset_index(name="cantidad")
+        .sort_values("cantidad", ascending=False)
+    )
+    if por_creador.empty:
+        st.info("No hay datos de quién registró cada uno todavía.")
+    else:
+        chart_creador = (
+            alt.Chart(por_creador)
+            .mark_bar(color=OXXO_ROJO, cornerRadiusEnd=4)
+            .encode(
+                x=alt.X("cantidad:Q", title="Generadores registrados"),
+                y=alt.Y("quien:N", title=None, sort="-x"),
+                tooltip=[
+                    alt.Tooltip("quien:N", title="Persona (localizador)"),
+                    alt.Tooltip("cantidad:Q", title="Generadores"),
+                ],
+            )
+            .properties(height=max(160, 28 * len(por_creador)))
+        )
+        st.altair_chart(chart_creador, use_container_width=True)
+
+    st.divider()
     st.subheader("Generadores")
     st.write(
         "Cuando el radio de recolección (300 m) de dos puntos potenciales "
@@ -1447,48 +1539,6 @@ else:
                     ),
                     df_potenciales_survey=df_potenciales_survey,
                 )
-
-        st.divider()
-        st.markdown("#### 📊 Generadores registrados por persona (localizador)")
-
-        df_gen_solo = df_generadores.copy()
-        if "tipo_levantamiento" in df_gen_solo.columns:
-            df_gen_solo = df_gen_solo[
-                df_gen_solo["tipo_levantamiento"].astype(str).str.strip().str.lower() != "punto potencial"
-            ]
-
-        # Quién hizo cada registro: se prefiere 'localizador' (nombre que
-        # la persona escribe en el formulario de Survey123) sobre
-        # 'creador' (la cuenta de inicio de sesión, que puede ser genérica
-        # o compartida entre varias personas).
-        df_gen_solo["quien"] = df_gen_solo.get("localizador", "").astype(str).str.strip()
-        if "creador" in df_gen_solo.columns:
-            df_gen_solo["quien"] = df_gen_solo["quien"].where(
-                df_gen_solo["quien"] != "", df_gen_solo["creador"].astype(str).str.strip()
-            )
-
-        por_creador = (
-            df_gen_solo[df_gen_solo["quien"].astype(str).str.strip() != ""]
-            .groupby("quien").size().reset_index(name="cantidad")
-            .sort_values("cantidad", ascending=False)
-        )
-        if por_creador.empty:
-            st.info("No hay datos de quién registró cada uno.")
-        else:
-            chart_creador = (
-                alt.Chart(por_creador)
-                .mark_bar(color=OXXO_ROJO, cornerRadiusEnd=4)
-                .encode(
-                    x=alt.X("cantidad:Q", title="Generadores registrados"),
-                    y=alt.Y("quien:N", title=None, sort="-x"),
-                    tooltip=[
-                        alt.Tooltip("quien:N", title="Persona (localizador)"),
-                        alt.Tooltip("cantidad:Q", title="Generadores"),
-                    ],
-                )
-                .properties(height=max(160, 28 * len(por_creador)))
-            )
-            st.altair_chart(chart_creador, use_container_width=True)
 
         st.divider()
         st.markdown("#### Consultar antes de registrar un generador nuevo")
