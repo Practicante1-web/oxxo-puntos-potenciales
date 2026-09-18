@@ -1103,6 +1103,12 @@ with tab2:
 
         alertas_gen = generadores_agrupados[generadores_agrupados["cantidad_registros"] > 1].reset_index(drop=True)
 
+        with st.container(border=True):
+            mc1, mc2, mc3 = st.columns(3)
+            mc1.metric("🏢 Generadores (únicos)", len(generadores_agrupados))
+            mc2.metric("📋 Registros en Survey123", len(df_generadores))
+            mc3.metric("⚠️ Con duplicidad", len(alertas_gen))
+
         st.markdown("#### 🗺️ Mapa de generadores")
         modo_mapa_gen = st.radio(
             "¿Cuáles quieres ver?",
