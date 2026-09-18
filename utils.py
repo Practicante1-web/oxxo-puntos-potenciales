@@ -36,6 +36,7 @@ UMBRAL_SIMILITUD_NOMBRE = 0.75
 # Columnas del dataset normalizado que usa internamente la app.
 COLUMNAS = [
     "id",
+    "fuente",
     "especialista",
     "ciudad",
     "upz",
@@ -51,6 +52,21 @@ COLUMNAS = [
     "comentarios",
     "notas",
 ]
+
+# Módulo 1 ahora combina puntos potenciales de 4 orígenes distintos en un
+# solo mapa por capas. Cada uno tiene su propio color de pin (ver
+# iconos.py) para poder distinguirlos de un vistazo.
+FUENTE_ESPECIALISTAS = "Especialistas"
+FUENTE_OPERACION = "Operación"
+FUENTE_TERCEROS = "Terceros"
+FUENTE_INMOBILIARIA = "Inmobiliaria"
+
+FUENTE_COLOR_ICONO = {
+    FUENTE_ESPECIALISTAS: "morado",
+    FUENTE_OPERACION: "azul_claro",
+    FUENTE_TERCEROS: "rosado",
+    FUENTE_INMOBILIARIA: "verde",
+}
 
 # Valores reales que usa hoy el área en la columna "Estatus En Bitacora"
 # (el estado que le da el comité a cada punto potencial).
@@ -310,6 +326,37 @@ def leer_desde_url(url: str, timeout: int = 20) -> pd.DataFrame:
     return _normalizar_crudo(crudo)
 
 
+def leer_fuentes_modulo1_desde_url(url: str, timeout: int = 20) -> pd.DataFrame:
+    """
+    Igual que leer_desde_url, pero para el Excel multi-hoja del Módulo 1
+    (Especialistas + Terceros + Operación + Inmobiliaria si existe). Usa
+    leer_fuentes_modulo1 para el parseo en vez de _normalizar_crudo, para
+    que la conexión en vivo a OneDrive funcione igual con el archivo nuevo
+    de varias hojas.
+    """
+    import requests
+
+    url_descarga = convertir_link_compartido_a_descarga(url)
+    try:
+        resp = requests.get(url_descarga, timeout=timeout, allow_redirects=True)
+    except requests.exceptions.RequestException as e:
+        raise ValueError(f"No se pudo descargar el archivo: {e}") from e
+
+    content_type = resp.headers.get("Content-Type", "")
+    if resp.status_code != 200 or "html" in content_type.lower():
+        raise ValueError(
+            "El link no devolvió un archivo de Excel (parece requerir inicio "
+            "de sesión). Para que esto funcione, el archivo debe compartirse "
+            "en OneDrive/SharePoint con el permiso 'Cualquier persona con el "
+            "vínculo', no solo 'Personas de la organización'."
+        )
+
+    try:
+        return leer_fuentes_modulo1(io.BytesIO(resp.content))
+    except Exception as e:
+        raise ValueError(f"El archivo descargado no se pudo leer como Excel: {e}") from e
+
+
 # Distintos nombres de columna que hemos visto en los archivos reales del
 # área, mapeados a una clave interna común. Las claves de búsqueda están
 # normalizadas (minúsculas, sin tildes) para que no importen mayúsculas,
@@ -388,6 +435,7 @@ def _normalizar_crudo(crudo: pd.DataFrame) -> pd.DataFrame:
 
     normalizado = pd.DataFrame()
     normalizado["id"] = range(1, len(real) + 1)
+    normalizado["fuente"] = FUENTE_ESPECIALISTAS
     normalizado["especialista"] = columna("especialista", real).fillna("").astype(str).str.strip()
     normalizado["ciudad"] = columna("ciudad", real).apply(normalizar_ciudad)
     normalizado["upz"] = columna("upz", real).fillna("").astype(str).str.strip()
@@ -432,6 +480,210 @@ def _normalizar_crudo(crudo: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Módulo 1 con varias fuentes: especialistas (arriba) + operación + terceros
+# + inmobiliaria — todas viven en UN SOLO archivo Excel, una hoja por fuente.
+# ---------------------------------------------------------------------------
+def _col_por_nombres(tabla: pd.DataFrame, nombres_posibles: list, default=""):
+    """
+    Busca, en `tabla`, una columna cuyo nombre (normalizado, sin tildes/
+    espacios de más) coincida con alguno de `nombres_posibles` — para no
+    depender de que el archivo tenga el nombre EXACTO (ej. 'Especialista
+    asignado ' con espacio al final).
+    """
+    normalizados = {normalizar_texto(c): c for c in tabla.columns}
+    for nombre in nombres_posibles:
+        clave = normalizar_texto(nombre)
+        if clave in normalizados:
+            return tabla[normalizados[clave]]
+    return pd.Series([default] * len(tabla), index=tabla.index)
+
+
+def _buscar_hoja(excel: "pd.ExcelFile", palabras_clave: list):
+    """
+    Busca, entre las hojas de un Excel, la primera cuyo nombre (normalizado)
+    contenga alguna de las palabras clave dadas — tolerante a que renombren
+    la hoja ligeramente (ej. 'Visitas_Operaciones' o 'Operaciones 2026').
+    Devuelve el nombre de la hoja, o None si no encontró ninguna.
+    """
+    for nombre_hoja in excel.sheet_names:
+        clave = normalizar_texto(nombre_hoja)
+        if any(normalizar_texto(palabra) in clave for palabra in palabras_clave):
+            return nombre_hoja
+    return None
+
+
+def _parsear_terceros(crudo: pd.DataFrame) -> pd.DataFrame:
+    """Normaliza la hoja 'Base puntos terceros' al esquema común (COLUMNAS)."""
+    crudo = crudo.copy()
+    crudo.columns = [str(c).strip() for c in crudo.columns]
+    # El export de Excel suele dejar cientos de miles de filas "fantasma"
+    # vacías (formato aplicado a toda la columna) — se descartan antes de
+    # procesar nada, quedándose solo con las filas que sí tienen un
+    # proyecto/nombre.
+    crudo = crudo[_col_por_nombres(crudo, ["Proyecto"]).notna()].reset_index(drop=True)
+    n = len(crudo)
+
+    coords = _col_por_nombres(crudo, ["Coordenadas"])
+    lat_lon = coords.apply(parsear_coordenada_pegada)
+    latitud = lat_lon.apply(lambda v: v[0] if v else None)
+    longitud = lat_lon.apply(lambda v: v[1] if v else None)
+
+    razon_descarte = _col_por_nombres(crudo, ["Razón de descarte"]).fillna("").astype(str).str.strip()
+    comentario_descarte = _col_por_nombres(crudo, ["Comentarios de descarte"]).fillna("").astype(str).str.strip()
+    comentario_int = _col_por_nombres(crudo, ["Comentarios Int Exp"]).fillna("").astype(str).str.strip()
+    localizador = _col_por_nombres(crudo, ["Localizador"]).fillna("").astype(str).str.strip()
+    propietario = _col_por_nombres(crudo, ["Nombre de propietario"]).fillna("").astype(str).str.strip()
+    contacto = _col_por_nombres(crudo, ["Contacto propietario"]).fillna("").astype(str).str.strip()
+
+    notas_partes = []
+    for i in range(n):
+        piezas = []
+        if localizador.iloc[i] and localizador.iloc[i].lower() != "no aplica":
+            piezas.append(f"Localizador: {localizador.iloc[i]}")
+        if propietario.iloc[i]:
+            piezas.append(f"Propietario: {propietario.iloc[i]}")
+        if contacto.iloc[i]:
+            piezas.append(f"Contacto: {contacto.iloc[i]}")
+        notas_partes.append(" · ".join(piezas))
+
+    comentarios_final = []
+    for i in range(n):
+        piezas = [p for p in [comentario_int.iloc[i], comentario_descarte.iloc[i]] if p]
+        comentarios_final.append(" | ".join(piezas))
+
+    normalizado = pd.DataFrame()
+    normalizado["fuente"] = [FUENTE_TERCEROS] * n
+    normalizado["especialista"] = (
+        _col_por_nombres(crudo, ["Especialista asignado"]).fillna("").astype(str).str.strip()
+    )
+    normalizado["ciudad"] = _col_por_nombres(crudo, ["Ciudad"]).apply(normalizar_ciudad)
+    normalizado["upz"] = _col_por_nombres(crudo, ["Plaza"]).fillna("").astype(str).str.strip()
+    normalizado["local_identificado"] = (
+        _col_por_nombres(crudo, ["Proyecto"]).fillna("").astype(str).str.strip()
+    )
+    normalizado["fecha_registro"] = pd.to_datetime(
+        _col_por_nombres(crudo, ["Fecha de recepción", "Fecha de recepcion"]), errors="coerce"
+    ).dt.date
+    normalizado["estado"] = (
+        _col_por_nombres(crudo, ["Estatus general"]).fillna("Sin estado").astype(str).str.strip()
+        .replace("", "Sin estado")
+    )
+    normalizado["estado_comite"] = razon_descarte  # se reutiliza como "por qué se descartó", si aplica
+    normalizado["latitud"] = pd.to_numeric(latitud, errors="coerce")
+    normalizado["longitud"] = pd.to_numeric(longitud, errors="coerce")
+    normalizado["practicante"] = ""
+    normalizado["tiendas_evaluadas"] = 0
+    normalizado["detalle_microsaturacion"] = ""
+    normalizado["comentarios"] = comentarios_final
+    normalizado["notas"] = notas_partes
+
+    normalizado = normalizado[normalizado["local_identificado"].str.strip() != ""].reset_index(drop=True)
+    return normalizado
+
+
+def _parsear_operacion(crudo: pd.DataFrame) -> pd.DataFrame:
+    """Normaliza la hoja 'Visitas_Operaciones' al esquema común (COLUMNAS)."""
+    crudo = crudo.copy()
+    crudo.columns = [str(c).strip() for c in crudo.columns]
+    crudo = crudo[_col_por_nombres(crudo, ["Nombre del Punto"]).notna()].reset_index(drop=True)
+    n = len(crudo)
+
+    direccion = _col_por_nombres(crudo, ["Dirección", "Direccion"]).fillna("").astype(str).str.strip()
+    razon_descarte = _col_por_nombres(
+        crudo, ["Razón de descarte expansión", "Razon de descarte"]
+    ).fillna("").astype(str).str.strip()
+    comentarios = _col_por_nombres(crudo, ["Comentarios expansión", "Comentarios"]).fillna("").astype(str).str.strip()
+
+    notas_partes = [f"Dirección: {d}" if d else "" for d in direccion]
+
+    normalizado = pd.DataFrame()
+    normalizado["fuente"] = [FUENTE_OPERACION] * n
+    normalizado["especialista"] = (
+        _col_por_nombres(crudo, ["Especialista asignado"]).fillna("").astype(str).str.strip()
+    )
+    especialista_vacio = normalizado["especialista"].str.strip() == ""
+    jefe_zona = _col_por_nombres(crudo, ["Jefe de zona"]).fillna("").astype(str).str.strip()
+    normalizado.loc[especialista_vacio, "especialista"] = jefe_zona[especialista_vacio]
+
+    normalizado["ciudad"] = _col_por_nombres(crudo, ["Plaza", "Región", "Region"]).apply(normalizar_ciudad)
+    normalizado["upz"] = ""
+    normalizado["local_identificado"] = (
+        _col_por_nombres(crudo, ["Nombre del Punto"]).fillna("").astype(str).str.strip()
+    )
+    normalizado["fecha_registro"] = pd.to_datetime(
+        _col_por_nombres(crudo, ["Fecha de inicio"]), errors="coerce"
+    ).dt.date
+    normalizado["estado"] = (
+        _col_por_nombres(crudo, ["Estado Growth", "Estado"]).fillna("Sin estado").astype(str).str.strip()
+        .replace("", "Sin estado")
+    )
+    normalizado["estado_comite"] = razon_descarte
+    normalizado["latitud"] = pd.to_numeric(_col_por_nombres(crudo, ["Y"]), errors="coerce")
+    normalizado["longitud"] = pd.to_numeric(_col_por_nombres(crudo, ["X"]), errors="coerce")
+    normalizado["practicante"] = _col_por_nombres(crudo, ["Gestor asignado"]).fillna("").astype(str).str.strip()
+    normalizado["tiendas_evaluadas"] = 0
+    normalizado["detalle_microsaturacion"] = ""
+    normalizado["comentarios"] = comentarios
+    normalizado["notas"] = notas_partes
+
+    normalizado = normalizado[normalizado["local_identificado"].str.strip() != ""].reset_index(drop=True)
+    return normalizado
+
+
+def leer_fuentes_modulo1(ruta_o_buffer, nombre_archivo: str = "") -> pd.DataFrame:
+    """
+    Lee el Excel de Módulo 1 (una hoja por fuente: especialistas/ISO,
+    'Base puntos terceros', 'Visitas_Operaciones') y devuelve UN SOLO
+    DataFrame combinado, ya normalizado, con la columna 'fuente' marcando
+    de dónde viene cada punto (ver FUENTE_ESPECIALISTAS/OPERACION/TERCEROS).
+
+    Es tolerante a que las hojas no se llamen EXACTAMENTE así: busca por
+    palabras clave en el nombre de la hoja. Si alguna de las 3 no aparece,
+    simplemente no aporta puntos de esa fuente (no rompe la carga de las
+    demás) — pensado para cuando alguna fuente todavía no tiene datos.
+    """
+    if hasattr(ruta_o_buffer, "seek"):
+        ruta_o_buffer.seek(0)
+    excel = pd.ExcelFile(ruta_o_buffer)
+
+    partes = []
+    errores = []
+
+    hoja_esp = _buscar_hoja(excel, ["iso"])
+    if hoja_esp:
+        try:
+            partes.append(_normalizar_crudo(excel.parse(sheet_name=hoja_esp)))
+        except Exception as e:
+            errores.append(f"Especialistas (hoja '{hoja_esp}'): {e}")
+
+    hoja_ter = _buscar_hoja(excel, ["terceros"])
+    if hoja_ter:
+        try:
+            partes.append(_parsear_terceros(excel.parse(sheet_name=hoja_ter)))
+        except Exception as e:
+            errores.append(f"Terceros (hoja '{hoja_ter}'): {e}")
+
+    hoja_ope = _buscar_hoja(excel, ["operacion", "operaciones", "visitas"])
+    if hoja_ope:
+        try:
+            partes.append(_parsear_operacion(excel.parse(sheet_name=hoja_ope)))
+        except Exception as e:
+            errores.append(f"Operación (hoja '{hoja_ope}'): {e}")
+
+    if not partes:
+        detalle = ("; " + "; ".join(errores)) if errores else ""
+        raise ValueError(
+            "No se encontró ninguna hoja reconocible en el archivo (se "
+            "buscaron nombres con 'ISO', 'terceros' u 'operación')" + detalle
+        )
+
+    combinado = pd.concat(partes, ignore_index=True)
+    combinado["id"] = range(1, len(combinado) + 1)
+    combinado = combinado.reindex(columns=COLUMNAS, fill_value="")
+    return combinado
+
+
+# ---------------------------------------------------------------------------
 # Búsqueda de cercanos / coincidencias por nombre
 # ---------------------------------------------------------------------------
 def buscar_cercanos(
@@ -471,6 +723,124 @@ def buscar_por_nombre(
     )
     resultado = resultado[resultado["similitud_nombre"] >= umbral_similitud]
     return resultado.sort_values("similitud_nombre", ascending=False)
+
+
+def detectar_duplicados_potenciales(
+    df: pd.DataFrame,
+    umbral_m: float = UMBRAL_DUPLICIDAD_M,
+    umbral_coordenada_m: float = 15,
+    umbral_similitud: float = UMBRAL_SIMILITUD_NOMBRE,
+) -> pd.DataFrame:
+    """
+    Arma la tabla de "posibles duplicados" de Módulo 1, mirando TODAS las
+    fuentes juntas (especialistas, operación, terceros, inmobiliaria) —
+    porque el punto de este módulo es justo evitar que el mismo local se
+    registre dos veces sin importar quién lo mandó.
+
+    Dos puntos se consideran el mismo lugar si:
+    1. Coordenada casi exacta (≤ umbral_coordenada_m, 15 m) — sin importar
+       el nombre.
+    2. Distancia dentro del radio de recolección (≤ umbral_m) Y nombre
+       parecido (≥ umbral_similitud).
+    3. Nombre IDÉNTICO (normalizado: sin tildes/mayúsculas/espacios de
+       más), sin importar qué tan lejos estén — puede ser un error de
+       coordenada, o el mismo local escrito igual por dos personas.
+
+    Devuelve UNA FILA POR CADA PAR duplicado (no por grupo), con: nombre,
+    nombre_duplicado, coordenadas de cada uno, distancia_m, motivo y
+    fuente/fuente_duplicado (qué fuentes están involucradas, ej.
+    "Especialistas" y "Terceros" — útil para detectar cuando dos áreas
+    distintas están mirando el mismo local sin saberlo).
+
+    Por rendimiento (con cientos/miles de puntos, comparar TODOS contra
+    TODOS sería muy lento), los criterios 1 y 2 usan una cuadrícula
+    espacial: cada punto solo se compara contra los que caen en su misma
+    celda o una vecina (~3x umbral_m de lado), nunca contra el dataset
+    completo. El criterio 3 agrupa por nombre normalizado (hash), también
+    sin comparar todos contra todos.
+    """
+    columnas = [
+        "nombre", "nombre_duplicado", "latitud", "longitud", "latitud_duplicado",
+        "longitud_duplicado", "distancia_m", "motivo", "fuente", "fuente_duplicado",
+        "id", "id_duplicado",
+    ]
+    if df.empty:
+        return pd.DataFrame(columns=columnas)
+
+    con_coords = df.dropna(subset=["latitud", "longitud"]).reset_index(drop=True)
+    n = len(con_coords)
+    pares_vistos = set()
+    filas = []
+
+    def _agregar(i, j, distancia, motivo):
+        clave = (i, j) if i < j else (j, i)
+        if clave in pares_vistos:
+            return
+        pares_vistos.add(clave)
+        a, b = con_coords.iloc[clave[0]], con_coords.iloc[clave[1]]
+        filas.append({
+            "nombre": a["local_identificado"],
+            "nombre_duplicado": b["local_identificado"],
+            "latitud": a["latitud"], "longitud": a["longitud"],
+            "latitud_duplicado": b["latitud"], "longitud_duplicado": b["longitud"],
+            "distancia_m": round(distancia, 1) if distancia is not None else None,
+            "motivo": motivo,
+            "fuente": a.get("fuente", ""), "fuente_duplicado": b.get("fuente", ""),
+            "id": a.get("id", ""), "id_duplicado": b.get("id", ""),
+        })
+
+    # --- Criterios 1 y 2: cuadrícula espacial (celdas de ~umbral_m) ---
+    if n > 0:
+        lado_grados = max(umbral_m, 1) / 111000  # ~metros -> grados (aprox.)
+        grid = {}
+        for idx, fila in con_coords.iterrows():
+            celda = (int(fila["latitud"] // lado_grados), int(fila["longitud"] // lado_grados))
+            grid.setdefault(celda, []).append(idx)
+
+        for (cr, cc), indices in grid.items():
+            candidatos = list(indices)
+            for dr in (-1, 0, 1):
+                for dc in (-1, 0, 1):
+                    if dr == 0 and dc == 0:
+                        continue
+                    candidatos.extend(grid.get((cr + dr, cc + dc), []))
+            for pos_i, i in enumerate(indices):
+                a = con_coords.iloc[i]
+                for j in candidatos:
+                    if j <= i:
+                        continue
+                    b = con_coords.iloc[j]
+                    distancia = haversine_m(a["latitud"], a["longitud"], b["latitud"], b["longitud"])
+                    if distancia <= umbral_coordenada_m:
+                        _agregar(i, j, distancia, "Coordenada casi exacta")
+                    elif distancia <= umbral_m:
+                        similitud = similitud_nombre(a["local_identificado"], b["local_identificado"])
+                        if similitud >= umbral_similitud:
+                            _agregar(i, j, distancia, f"Cercanía ({distancia:.0f} m) y nombre parecido")
+
+    # --- Criterio 3: mismo nombre normalizado, sin importar la distancia ---
+    grupos_nombre = {}
+    for idx, fila in con_coords.iterrows():
+        clave = normalizar_texto(fila["local_identificado"])
+        if clave:
+            grupos_nombre.setdefault(clave, []).append(idx)
+    for indices in grupos_nombre.values():
+        if len(indices) < 2:
+            continue
+        for pos_i in range(len(indices)):
+            for pos_j in range(pos_i + 1, len(indices)):
+                i, j = indices[pos_i], indices[pos_j]
+                if (i, j) in pares_vistos or (j, i) in pares_vistos:
+                    continue
+                a, b = con_coords.iloc[i], con_coords.iloc[j]
+                distancia = haversine_m(a["latitud"], a["longitud"], b["latitud"], b["longitud"])
+                if distancia > umbral_m:  # si ya está cerca, el criterio 1/2 ya lo cubrió
+                    _agregar(i, j, distancia, "Mismo nombre, distinta ubicación")
+
+    resultado = pd.DataFrame(filas, columns=columnas)
+    if resultado.empty:
+        return resultado
+    return resultado.sort_values("distancia_m", na_position="last").reset_index(drop=True)
 
 
 # Abreviaturas comunes en direcciones colombianas que el buscador gratuito
@@ -584,7 +954,9 @@ def parsear_coordenada_pegada(texto: str):
     -74.092287' o '4.697614 -74.092287', tal cual la copia Google Maps),
     devuelve (lat, lon). Si no tiene esa forma, devuelve None.
     """
-    texto = (texto or "").strip()
+    if texto is None or (isinstance(texto, float) and pd.isna(texto)):
+        return None
+    texto = str(texto).strip()
     if not texto:
         return None
     patron = re.match(r"^\s*(-?\d+(?:\.\d+)?)\s*[,\s]\s*(-?\d+(?:\.\d+)?)\s*$", texto)
@@ -995,7 +1367,7 @@ def agrupar_generadores(
     columnas = [
         "nombre_generador", "tipo_generador", "latitud", "longitud",
         "cantidad_registros", "puntos_asociados", "especialistas_asociados",
-        "registrado_por", "duplicado_por",
+        "registrado_por", "duplicado_por", "nombre_duplicado",
     ]
     con_coords = df_generadores.dropna(subset=["latitud", "longitud"]).copy()
     if incluir_solo_generadores and "tipo_levantamiento" in con_coords.columns:
@@ -1045,6 +1417,7 @@ def agrupar_generadores(
                 "puntos": [],
                 "especialistas": [],
                 "creadores": [],
+                "nombres": [],
             }
             grupos.append(grupo_encontrado)
 
@@ -1052,6 +1425,9 @@ def agrupar_generadores(
             grupo_encontrado["razones"].append(razon_match)
 
         grupo_encontrado["registros"].append(fila)
+        nombre_str = str(nombre).strip()
+        if nombre_str and nombre_str not in grupo_encontrado["nombres"]:
+            grupo_encontrado["nombres"].append(nombre_str)
         punto = str(fila.get("nombre_punto_potencial", "")).strip()
         if punto and punto not in grupo_encontrado["puntos"]:
             grupo_encontrado["puntos"].append(punto)
@@ -1077,6 +1453,17 @@ def agrupar_generadores(
             return "Coordenada casi exacta"
         return "Cercanía + nombre parecido"
 
+    def _nombre_duplicado(g):
+        # Nombre(s) con los que se está repitiendo: los otros nombres
+        # distintos que quedaron agrupados en el mismo generador (sin
+        # contar el nombre representativo). Así, en vez de solo decir
+        # "es un duplicado", la tabla puede mostrar con cuál se repite.
+        if len(g["registros"]) <= 1:
+            return ""
+        clave_repr = normalizar_texto(g["nombre_generador"])
+        otros = [n for n in g["nombres"] if normalizar_texto(n) != clave_repr]
+        return ", ".join(otros) if otros else g["nombre_generador"]
+
     resultado = pd.DataFrame(
         [
             {
@@ -1089,6 +1476,7 @@ def agrupar_generadores(
                 "especialistas_asociados": ", ".join(g["especialistas"]) if g["especialistas"] else "",
                 "registrado_por": ", ".join(g["creadores"]) if g["creadores"] else "",
                 "duplicado_por": _duplicado_por(g),
+                "nombre_duplicado": _nombre_duplicado(g),
             }
             for g in grupos
         ],
@@ -1113,6 +1501,7 @@ def registrar_punto(
     """Agrega un nuevo punto potencial al DataFrame y lo retorna."""
     nuevo = {
         "id": siguiente_id(df),
+        "fuente": FUENTE_ESPECIALISTAS,
         "especialista": especialista,
         "ciudad": ciudad,
         "upz": upz,
@@ -1134,3 +1523,166 @@ def registrar_punto(
 def eliminar_punto(df: pd.DataFrame, id_punto: int) -> pd.DataFrame:
     """Elimina el punto con ese id (por ejemplo, uno de prueba) y retorna el DataFrame resultante."""
     return df[df["id"] != id_punto].reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# Inmobiliarias — evaluación de puntos (Fase 1, borrador funcional)
+# ---------------------------------------------------------------------------
+# Estas son las razones de descarte que ya maneja el área (tal cual las
+# compartió Alisson) — se dejan disponibles para que se puedan elegir a mano
+# en el informe, además de las que el sistema sugiere solo según cómo se
+# calificó cada criterio.
+RAZONES_DESCARTE_INMOBILIARIA = [
+    "Variables de éxito",
+    "Área/Propuesta de valor",
+    "Condiciones comerciales",
+    "Rentado a otra marca",
+    "Condiciones Jurídicas",
+    "Zonas no prioritaria",
+    "Vigencia de contrato",
+    "Canibalización",
+    "Renta del inmueble",
+    "Cláusula penal/Contrato",
+    "Opción de proyecto con mejor potencial",
+    "Duplicado",
+    "SAGRILAFT",
+]
+
+# Razones de aprobación sugeridas por Claude (no existían antes en el área)
+# — complementan las de descarte para poder explicar también por qué SÍ se
+# aprueba un punto, no solo por qué se descarta.
+RAZONES_APROBACION_INMOBILIARIA = [
+    "Buena accesibilidad",
+    "Buena visibilidad",
+    "Buen flujo de personas",
+    "Buenos generadores cercanos",
+    "Zona prioritaria para la marca",
+    "Condiciones comerciales favorables",
+    "Condiciones jurídicas en regla",
+    "Vigencia de contrato adecuada",
+    "Sin riesgo de canibalización",
+    "Renta acorde al presupuesto",
+    "Cláusula penal / contrato razonable",
+    "Validación SAGRILAFT aprobada",
+]
+
+# Criterios de la evaluación (rubrica simple, pensada para que Alisson la
+# pueda ajustar con casos reales apenas le lleguen puntos de inmobiliarias).
+# Cada criterio tiene 3 opciones posibles y su puntaje (0, 1 o 2). El
+# puntaje total se convierte en porcentaje sobre el máximo posible, y ese
+# porcentaje decide el nivel (Alto/Medio/Bajo).
+CRITERIOS_INMOBILIARIA = [
+    {"clave": "accesibilidad", "etiqueta": "Accesibilidad al punto",
+     "opciones": {"Buena": 2, "Regular": 1, "Mala": 0}},
+    {"clave": "visibilidad", "etiqueta": "Visibilidad del local",
+     "opciones": {"Buena": 2, "Regular": 1, "Mala": 0}},
+    {"clave": "flujo_personas", "etiqueta": "Flujo de personas",
+     "opciones": {"Alto": 2, "Medio": 1, "Bajo": 0}},
+    {"clave": "generadores_cercanos", "etiqueta": "Generadores cercanos (tráfico/comercio)",
+     "opciones": {"Sí": 2, "Algunos": 1, "No": 0}},
+    {"clave": "condiciones_comerciales", "etiqueta": "Condiciones comerciales",
+     "opciones": {"Favorables": 2, "Aceptables": 1, "Desfavorables": 0}},
+    {"clave": "condiciones_juridicas", "etiqueta": "Condiciones jurídicas",
+     "opciones": {"En regla": 2, "Con observaciones": 1, "Con riesgos": 0}},
+    {"clave": "zona_prioritaria", "etiqueta": "Zona prioritaria para la marca",
+     "opciones": {"Sí": 2, "Parcial": 1, "No": 0}},
+    {"clave": "vigencia_contrato", "etiqueta": "Vigencia de contrato disponible",
+     "opciones": {"Adecuada": 2, "Corta": 1, "No disponible": 0}},
+    {"clave": "canibalizacion", "etiqueta": "Riesgo de canibalización con otra tienda",
+     "opciones": {"Sin riesgo": 2, "Riesgo bajo": 1, "Riesgo alto": 0}},
+    {"clave": "renta", "etiqueta": "Renta del inmueble frente al presupuesto",
+     "opciones": {"Dentro de presupuesto": 2, "Por encima, negociable": 1, "Muy por encima": 0}},
+    {"clave": "clausula_penal", "etiqueta": "Cláusula penal / condiciones del contrato",
+     "opciones": {"Razonable": 2, "Exigente": 1, "Inaceptable": 0}},
+    {"clave": "sagrilaft", "etiqueta": "Validación SAGRILAFT",
+     "opciones": {"Aprobado": 2, "Pendiente": 1, "Rechazado": 0}},
+    {"clave": "duplicado", "etiqueta": "¿Es un punto duplicado de otro ya evaluado?",
+     "opciones": {"No": 2, "Posible duplicado": 1, "Sí, duplicado": 0}},
+]
+
+# Qué criterio corresponde a cuál razón de aprobación/descarte, para que el
+# informe pueda explicar EN PALABRAS por qué se sugiere aprobar o descartar
+# (no solo mostrar un número). Solo se listan los criterios que tienen una
+# razón "oficial" de las que dio Alisson o de las que sugiere Claude — los
+# demás igual suman al puntaje pero no generan una frase aparte.
+_RAZON_APROBACION_POR_CRITERIO = {
+    "accesibilidad": "Buena accesibilidad",
+    "visibilidad": "Buena visibilidad",
+    "flujo_personas": "Buen flujo de personas",
+    "generadores_cercanos": "Buenos generadores cercanos",
+    "zona_prioritaria": "Zona prioritaria para la marca",
+    "condiciones_comerciales": "Condiciones comerciales favorables",
+    "condiciones_juridicas": "Condiciones jurídicas en regla",
+    "vigencia_contrato": "Vigencia de contrato adecuada",
+    "canibalizacion": "Sin riesgo de canibalización",
+    "renta": "Renta acorde al presupuesto",
+    "clausula_penal": "Cláusula penal / contrato razonable",
+    "sagrilaft": "Validación SAGRILAFT aprobada",
+}
+_RAZON_DESCARTE_POR_CRITERIO = {
+    "condiciones_comerciales": "Condiciones comerciales",
+    "condiciones_juridicas": "Condiciones Jurídicas",
+    "zona_prioritaria": "Zonas no prioritaria",
+    "vigencia_contrato": "Vigencia de contrato",
+    "canibalizacion": "Canibalización",
+    "renta": "Renta del inmueble",
+    "clausula_penal": "Cláusula penal/Contrato",
+    "sagrilaft": "SAGRILAFT",
+    "duplicado": "Duplicado",
+}
+
+
+def evaluar_punto_inmobiliario(respuestas: dict) -> dict:
+    """
+    Recibe un diccionario {clave_criterio: opción_elegida} (una opción por
+    cada criterio de CRITERIOS_INMOBILIARIA) y devuelve el resultado de la
+    evaluación: puntaje total, porcentaje, nivel (Alto/Medio/Bajo), el
+    detalle criterio por criterio, y listas de razones a favor / en contra
+    en palabras (para armar el informe).
+
+    Umbral de nivel (ajustable más adelante con casos reales, tal como
+    quedó acordado): >= 70% Alto, >= 40% Medio, el resto Bajo.
+    """
+    total = 0
+    maximo = 0
+    detalle = []
+    razones_a_favor = []
+    razones_en_contra = []
+
+    for criterio in CRITERIOS_INMOBILIARIA:
+        clave = criterio["clave"]
+        opciones = criterio["opciones"]
+        maximo_criterio = max(opciones.values())
+        maximo += maximo_criterio
+        respuesta = respuestas.get(clave)
+        puntos = opciones.get(respuesta, 0)
+        total += puntos
+        detalle.append({
+            "criterio": criterio["etiqueta"],
+            "respuesta": respuesta or "—",
+            "puntos": puntos,
+            "maximo": maximo_criterio,
+        })
+        if respuesta is not None:
+            if puntos == maximo_criterio and clave in _RAZON_APROBACION_POR_CRITERIO:
+                razones_a_favor.append(_RAZON_APROBACION_POR_CRITERIO[clave])
+            elif puntos == 0 and clave in _RAZON_DESCARTE_POR_CRITERIO:
+                razones_en_contra.append(_RAZON_DESCARTE_POR_CRITERIO[clave])
+
+    porcentaje = round((total / maximo) * 100, 1) if maximo else 0.0
+    if porcentaje >= 70:
+        nivel = "Alto"
+    elif porcentaje >= 40:
+        nivel = "Medio"
+    else:
+        nivel = "Bajo"
+
+    return {
+        "puntaje_total": total,
+        "puntaje_maximo": maximo,
+        "porcentaje": porcentaje,
+        "nivel": nivel,
+        "detalle": detalle,
+        "razones_a_favor": razones_a_favor,
+        "razones_en_contra": razones_en_contra,
+    }
