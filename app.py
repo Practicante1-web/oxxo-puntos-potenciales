@@ -1577,16 +1577,35 @@ else:
                     f"**Mostrando en el mapa SOLO este: '{parg['nombre_generador']}' "
                     f"(repetido con '{parg['nombre_duplicado']}')**"
                 )
-                # mostrar=None: no dibuja la capa de "Repetidos" completa (todos
-                # los demás generadores repetidos de Bogotá) — solo el pin
-                # resaltado de este, para que no se llene el mapa de puntos
-                # que no tienen que ver con la fila que se seleccionó.
-                renderizar_mapa_generadores(
-                    generadores_agrupados, None, key="mapa_generadores_seleccionado_alerta",
-                    punto_resaltado=(
+                # registros_originales trae la coordenada REAL de cada registro
+                # crudo que quedó agrupado como este generador (cada uno puede
+                # estar unos metros distinto en Survey123) — así se ven todos
+                # los puntos duplicados, no solo uno representativo.
+                registros_originales_grupo = parg.get("registros_originales") or []
+                if registros_originales_grupo:
+                    resaltados_gen = [
+                        (
+                            r["latitud"], r["longitud"], r["nombre"],
+                            f"Registrado por: {r.get('quien', '') or '—'}"
+                            f"\nCómo se detectó: {parg['duplicado_por']}",
+                        )
+                        for r in registros_originales_grupo
+                    ]
+                else:
+                    # Respaldo por si el grupo no trae registros_originales
+                    # (por ejemplo datos viejos en caché) — se muestra al menos
+                    # el punto representativo, como antes.
+                    resaltados_gen = (
                         parg["latitud"], parg["longitud"], parg["nombre_generador"],
                         f"Se repite con: {parg['nombre_duplicado']}\nCómo se detectó: {parg['duplicado_por']}",
-                    ),
+                    )
+                # mostrar=None: no dibuja la capa de "Repetidos" completa (todos
+                # los demás generadores repetidos de Bogotá) — solo los pines
+                # resaltados de este grupo, para que no se llene el mapa de
+                # puntos que no tienen que ver con la fila que se seleccionó.
+                renderizar_mapa_generadores(
+                    generadores_agrupados, None, key="mapa_generadores_seleccionado_alerta",
+                    punto_resaltado=resaltados_gen,
                     df_potenciales_survey=None,
                 )
 
