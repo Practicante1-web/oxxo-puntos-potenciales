@@ -754,6 +754,7 @@ UMBRAL_DUPLICIDAD_GENERADOR_M = 300
 
 GENERADOR_COLUMNAS = [
     "localizador",
+    "tipo_levantamiento",
     "nombre_punto_potencial",
     "nombre_generador",
     "tipo_generador",
@@ -768,6 +769,14 @@ GENERADOR_COLUMNAS = [
     "latitud",
     "longitud",
 ]
+
+# Distancia (en metros) para considerar que dos registros están en
+# prácticamente la MISMA coordenada exacta (ej. copiar/pegar el mismo
+# pin, o dos personas que marcaron el mismo punto en el mapa). Esto se
+# trata como duplicado SIEMPRE, sin importar si el nombre coincide o no
+# — es más estricto que UMBRAL_DUPLICIDAD_GENERADOR_M (300 m), que además
+# exige que el nombre se parezca.
+UMBRAL_COORDENADA_DUPLICADO_M = 15
 
 
 def leer_generadores_desde_arcgis(url: str = URL_GENERADORES, timeout: int = 20) -> pd.DataFrame:
@@ -830,6 +839,7 @@ def leer_generadores_desde_arcgis(url: str = URL_GENERADORES, timeout: int = 20)
         filas.append(
             {
                 "localizador": attrs.get("localizador") or "",
+                "tipo_levantamiento": attrs.get("tipo_de_levantamiento") or "",
                 "nombre_punto_potencial": attrs.get("nombre_del_punto_potencial") or "",
                 "nombre_generador": attrs.get("nombre_del_generador") or "",
                 "tipo_generador": attrs.get("tipo_de_generador") or "",
@@ -857,6 +867,7 @@ def leer_generadores_desde_arcgis(url: str = URL_GENERADORES, timeout: int = 20)
         df["nombre_punto_potencial"] = (
             df["nombre_punto_potencial"].fillna("").astype(str).str.strip()
         )
+        df["tipo_levantamiento"] = df["tipo_levantamiento"].fillna("").astype(str).str.strip()
     return df
 
 
@@ -882,6 +893,7 @@ def detectar_generadores_coincidentes(
     nombre: str = "",
     umbral_m: float = UMBRAL_DUPLICIDAD_GENERADOR_M,
     umbral_similitud: float = UMBRAL_SIMILITUD_NOMBRE,
+    incluir_solo_generadores: bool = True,
 ) -> pd.DataFrame:
     """
     Busca generadores existentes a menos de `umbral_m` de una coordenada.
@@ -892,6 +904,11 @@ def detectar_generadores_coincidentes(
     "Conjunto Acanto" vs "Conjunto Residencial Acanto"). La cercanía por
     coordenada es lo que manda para detectar duplicidad.
 
+    Si `incluir_solo_generadores=True` (por defecto) y el DataFrame trae
+    la columna 'tipo_levantamiento', se ignoran las filas marcadas como
+    "Punto potencial" (no son generadores, aunque vengan en la misma
+    encuesta de Survey123).
+
     Útil para consultar antes de registrar un generador nuevo en
     Survey123: si ya existe algo cerca, conviene vincularlo al punto
     actual en vez de crear un registro nuevo.
@@ -901,6 +918,10 @@ def detectar_generadores_coincidentes(
         return df_generadores.reindex(columns=columnas_resultado).iloc[0:0]
 
     con_coords = df_generadores.dropna(subset=["latitud", "longitud"]).copy()
+    if incluir_solo_generadores and "tipo_levantamiento" in con_coords.columns:
+        con_coords = con_coords[
+            con_coords["tipo_levantamiento"].astype(str).str.strip().str.lower() != "punto potencial"
+        ]
     if con_coords.empty:
         return df_generadores.reindex(columns=columnas_resultado).iloc[0:0]
 
@@ -925,21 +946,40 @@ def agrupar_generadores(
     df_generadores: pd.DataFrame,
     umbral_m: float = UMBRAL_DUPLICIDAD_GENERADOR_M,
     umbral_similitud: float = UMBRAL_SIMILITUD_NOMBRE,
+    umbral_coordenada_m: float = UMBRAL_COORDENADA_DUPLICADO_M,
     df_puntos: pd.DataFrame = None,
+    incluir_solo_generadores: bool = True,
 ) -> pd.DataFrame:
     """
     Agrupa los registros crudos de generadores que probablemente sean el
-    mismo lugar físico (nombre parecido + cercanos, radio de 300 m) en un
-    solo renglón por generador único, listando todos los puntos
-    potenciales a los que quedó vinculado.
+    mismo lugar físico en un solo renglón por generador único, listando
+    todos los puntos potenciales a los que quedó vinculado.
 
-    El agrupamiento se hace SOLO por cercanía (radio de `umbral_m`,
-    300 m por defecto) — no por nombre. Esto es a propósito: la misma
-    ubicación física puede quedar escrita con nombres distintos según
-    quién la registró (ej. "Conjunto Acanto" vs "Conjunto Residencial
-    Acanto"), así que exigir nombre parecido dejaba pasar duplicados
-    reales sin detectar. El parámetro `umbral_similitud` se conserva
-    solo por compatibilidad y ya no se usa para decidir el agrupamiento.
+    Dos formas de detectar que dos registros son el MISMO generador
+    (cualquiera de las dos basta):
+
+    1. Coordenada casi exacta (≤ `umbral_coordenada_m`, 15 m por
+       defecto): se asume que es el mismo lugar sin importar el nombre —
+       es tan cerca que casi seguro es el mismo pin, solo que alguien lo
+       volvió a marcar (o lo copió).
+    2. Cercanía + nombre parecido (≤ `umbral_m`, 300 m, Y similitud de
+       nombre ≥ `umbral_similitud`): la misma ubicación física puede
+       quedar escrita con nombres distintos según quién la registró (ej.
+       "Conjunto Acanto" vs "Conjunto Residencial Acanto"), así que
+       dentro del radio de recolección se exige que el nombre también se
+       parezca — si el nombre es muy distinto, dentro de 300 m puede
+       perfectamente haber DOS generadores reales distintos (un colegio y
+       un banco en la misma cuadra, por ejemplo), y agruparlos sería
+       perder ese punto en el mapa. (Antes se agrupaba solo por
+       cercanía, sin exigir nombre parecido, y eso hacía que generadores
+       realmente distintos desaparecieran del mapa al quedar fundidos en
+       uno solo.)
+
+    Si `incluir_solo_generadores=True` (por defecto) y el DataFrame trae
+    la columna 'tipo_levantamiento', se excluyen las filas marcadas como
+    "Punto potencial" — esa misma encuesta de Survey123 se usa para
+    registrar tanto generadores como puntos potenciales, y un "Punto
+    potencial" no es un generador aunque venga en la misma capa.
 
     Si se pasa df_puntos (el DataFrame de puntos potenciales, con columnas
     'local_identificado' y 'especialista'), también arma la columna
@@ -955,25 +995,24 @@ def agrupar_generadores(
     columnas = [
         "nombre_generador", "tipo_generador", "latitud", "longitud",
         "cantidad_registros", "puntos_asociados", "especialistas_asociados",
-        "upz_asociadas",
+        "registrado_por", "duplicado_por",
     ]
     con_coords = df_generadores.dropna(subset=["latitud", "longitud"]).copy()
+    if incluir_solo_generadores and "tipo_levantamiento" in con_coords.columns:
+        con_coords = con_coords[
+            con_coords["tipo_levantamiento"].astype(str).str.strip().str.lower() != "punto potencial"
+        ]
     if con_coords.empty:
         return pd.DataFrame(columns=columnas)
 
-    # Mapa nombre-de-punto (normalizado) -> especialista / upz, para poder
-    # decir quién registró cada punto asociado a un generador repetido y en
-    # qué UPZ quedó cada uno (en vez de "colorear por UPZ", que no tiene
-    # mucho sentido acá porque un mismo generador puede quedar vinculado a
-    # puntos de UPZ distintas).
+    # Mapa nombre-de-punto (normalizado) -> especialista, para poder decir
+    # quién registró cada punto asociado a un generador repetido.
     mapa_especialista_por_punto = {}
-    mapa_upz_por_punto = {}
     if df_puntos is not None and not df_puntos.empty and "local_identificado" in df_puntos.columns:
         for _, fp in df_puntos.iterrows():
             clave = normalizar_texto(fp.get("local_identificado", ""))
             if clave:
                 mapa_especialista_por_punto[clave] = str(fp.get("especialista", "")).strip()
-                mapa_upz_por_punto[clave] = str(fp.get("upz", "")).strip()
 
     grupos = []  # cada grupo: dict con nombre, tipo, lat, lon, registros (list of rows)
 
@@ -981,11 +1020,19 @@ def agrupar_generadores(
         nombre = fila["nombre_generador"]
         lat, lon = fila["latitud"], fila["longitud"]
         grupo_encontrado = None
+        razon_match = None
         for grupo in grupos:
             distancia = haversine_m(lat, lon, grupo["latitud"], grupo["longitud"])
-            if distancia <= umbral_m:
+            if distancia <= umbral_coordenada_m:
                 grupo_encontrado = grupo
+                razon_match = "coordenada"
                 break
+            if distancia <= umbral_m:
+                sim = similitud_nombre(nombre, grupo["nombre_generador"])
+                if sim >= umbral_similitud:
+                    grupo_encontrado = grupo
+                    razon_match = "distancia_nombre"
+                    break
 
         if grupo_encontrado is None:
             grupo_encontrado = {
@@ -993,12 +1040,16 @@ def agrupar_generadores(
                 "tipo_generador": fila.get("tipo_generador", ""),
                 "latitud": lat,
                 "longitud": lon,
+                "razones": [],
                 "registros": [],
                 "puntos": [],
                 "especialistas": [],
-                "upz": [],
+                "creadores": [],
             }
             grupos.append(grupo_encontrado)
+
+        if razon_match:
+            grupo_encontrado["razones"].append(razon_match)
 
         grupo_encontrado["registros"].append(fila)
         punto = str(fila.get("nombre_punto_potencial", "")).strip()
@@ -1008,9 +1059,23 @@ def agrupar_generadores(
         especialista = mapa_especialista_por_punto.get(clave_punto, "")
         if especialista and especialista not in grupo_encontrado["especialistas"]:
             grupo_encontrado["especialistas"].append(especialista)
-        upz_punto = mapa_upz_por_punto.get(clave_punto, "")
-        if upz_punto and upz_punto not in grupo_encontrado["upz"]:
-            grupo_encontrado["upz"].append(upz_punto)
+        # Quién diligenció ESE registro puntual en Survey123 — a diferencia
+        # de 'especialistas_asociados' (que depende de que el generador
+        # esté vinculado a un punto potencial del Excel), esto siempre
+        # está disponible porque viene directo de la encuesta. Se prefiere
+        # 'localizador' (el nombre que la persona escribe en el
+        # formulario) sobre 'creador' (la cuenta de inicio de sesión de
+        # Survey123/ArcGIS, que puede ser genérica o compartida).
+        quien = str(fila.get("localizador", "")).strip() or str(fila.get("creador", "")).strip()
+        if quien and quien not in grupo_encontrado["creadores"]:
+            grupo_encontrado["creadores"].append(quien)
+
+    def _duplicado_por(g):
+        if len(g["registros"]) <= 1:
+            return ""
+        if "coordenada" in g["razones"]:
+            return "Coordenada casi exacta"
+        return "Cercanía + nombre parecido"
 
     resultado = pd.DataFrame(
         [
@@ -1022,7 +1087,8 @@ def agrupar_generadores(
                 "cantidad_registros": len(g["registros"]),
                 "puntos_asociados": ", ".join(g["puntos"]) if g["puntos"] else "",
                 "especialistas_asociados": ", ".join(g["especialistas"]) if g["especialistas"] else "",
-                "upz_asociadas": ", ".join(g["upz"]) if g["upz"] else "",
+                "registrado_por": ", ".join(g["creadores"]) if g["creadores"] else "",
+                "duplicado_por": _duplicado_por(g),
             }
             for g in grupos
         ],
