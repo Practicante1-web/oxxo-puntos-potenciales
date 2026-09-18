@@ -895,7 +895,6 @@ if modulo_activo.startswith("🔁"):
     cols_resumen_fuente = st.columns(2)
     for i_fuente, (fuente_resumen, color_resumen) in enumerate(FUENTE_COLOR_ICONO.items()):
         with cols_resumen_fuente[i_fuente % 2]:
-            st.markdown(f"*{fuente_resumen}*")
             sub_fuente = df[
                 (df["fuente"] == fuente_resumen) & (df["especialista"].astype(str).str.strip() != "")
             ]
@@ -903,23 +902,35 @@ if modulo_activo.startswith("🔁"):
                 sub_fuente.groupby("especialista").size().reset_index(name="cantidad")
                 .sort_values("cantidad", ascending=False)
             )
-            if conteo_fuente.empty:
-                st.caption("Todavía no hay datos para graficar.")
-            else:
-                chart_fuente = (
-                    alt.Chart(conteo_fuente)
-                    .mark_bar(color=_COLORES_HEX_LEYENDA.get(color_resumen, OXXO_ROJO), cornerRadiusEnd=4)
-                    .encode(
-                        x=alt.X("cantidad:Q", title="Puntos"),
-                        y=alt.Y("especialista:N", title=None, sort="-x"),
-                        tooltip=[
-                            alt.Tooltip("especialista:N", title="Especialista / responsable"),
-                            alt.Tooltip("cantidad:Q", title="Puntos"),
-                        ],
+
+            def _dibujar_chart_fuente():
+                if conteo_fuente.empty:
+                    st.caption("Todavía no hay datos para graficar.")
+                else:
+                    chart_fuente = (
+                        alt.Chart(conteo_fuente)
+                        .mark_bar(color=_COLORES_HEX_LEYENDA.get(color_resumen, OXXO_ROJO), cornerRadiusEnd=4)
+                        .encode(
+                            x=alt.X("cantidad:Q", title="Puntos"),
+                            y=alt.Y("especialista:N", title=None, sort="-x"),
+                            tooltip=[
+                                alt.Tooltip("especialista:N", title="Especialista / responsable"),
+                                alt.Tooltip("cantidad:Q", title="Puntos"),
+                            ],
+                        )
+                        .properties(height=max(90, 24 * len(conteo_fuente)))
                     )
-                    .properties(height=max(90, 24 * len(conteo_fuente)))
-                )
-                st.altair_chart(chart_fuente, use_container_width=True)
+                    st.altair_chart(chart_fuente, use_container_width=True)
+
+            # La de Operación se deja minimizada (colapsada) por defecto —
+            # suele traer muchos responsables distintos y la gráfica sale
+            # muy alta, descuadrando la cuadrícula de las 4.
+            if fuente_resumen == "Operación":
+                with st.expander(f"{fuente_resumen} ({len(conteo_fuente)} responsable(s))", expanded=False):
+                    _dibujar_chart_fuente()
+            else:
+                st.markdown(f"*{fuente_resumen}*")
+                _dibujar_chart_fuente()
 
     st.divider()
     st.subheader("Puntos potenciales")
