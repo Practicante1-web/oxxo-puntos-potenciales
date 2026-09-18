@@ -903,34 +903,37 @@ if modulo_activo.startswith("🔁"):
                 .sort_values("cantidad", ascending=False)
             )
 
-            def _dibujar_chart_fuente():
-                if conteo_fuente.empty:
+            def _dibujar_chart_fuente(datos, altura_fija=None):
+                if datos.empty:
                     st.caption("Todavía no hay datos para graficar.")
-                else:
-                    chart_fuente = (
-                        alt.Chart(conteo_fuente)
-                        .mark_bar(color=_COLORES_HEX_LEYENDA.get(color_resumen, OXXO_ROJO), cornerRadiusEnd=4)
-                        .encode(
-                            x=alt.X("cantidad:Q", title="Puntos"),
-                            y=alt.Y("especialista:N", title=None, sort="-x"),
-                            tooltip=[
-                                alt.Tooltip("especialista:N", title="Especialista / responsable"),
-                                alt.Tooltip("cantidad:Q", title="Puntos"),
-                            ],
-                        )
-                        .properties(height=max(90, 24 * len(conteo_fuente)))
+                    return
+                chart_fuente = (
+                    alt.Chart(datos)
+                    .mark_bar(color=_COLORES_HEX_LEYENDA.get(color_resumen, OXXO_ROJO), cornerRadiusEnd=4)
+                    .encode(
+                        x=alt.X("cantidad:Q", title="Puntos"),
+                        y=alt.Y("especialista:N", title=None, sort="-x"),
+                        tooltip=[
+                            alt.Tooltip("especialista:N", title="Especialista / responsable"),
+                            alt.Tooltip("cantidad:Q", title="Puntos"),
+                        ],
                     )
-                    st.altair_chart(chart_fuente, use_container_width=True)
+                    .properties(height=altura_fija if altura_fija else max(90, 24 * len(datos)))
+                )
+                st.altair_chart(chart_fuente, use_container_width=True)
 
-            # La de Operación se deja minimizada (colapsada) por defecto —
-            # suele traer muchos responsables distintos y la gráfica sale
-            # muy alta, descuadrando la cuadrícula de las 4.
-            if fuente_resumen == "Operación":
-                with st.expander(f"{fuente_resumen} ({len(conteo_fuente)} responsable(s))", expanded=False):
-                    _dibujar_chart_fuente()
+            st.markdown(f"*{fuente_resumen}*")
+            if fuente_resumen == "Operación" and len(conteo_fuente) > 8:
+                # La de Operación suele traer muchos responsables distintos
+                # y la gráfica sale muy alta — se deja un poco más pequeña
+                # por defecto (los 8 con más puntos) con la opción de verla
+                # completa abajo.
+                _dibujar_chart_fuente(conteo_fuente.head(8), altura_fija=200)
+                st.caption(f"Mostrando los 8 con más puntos, de {len(conteo_fuente)} responsables.")
+                with st.expander("Ver todos los responsables de Operación"):
+                    _dibujar_chart_fuente(conteo_fuente)
             else:
-                st.markdown(f"*{fuente_resumen}*")
-                _dibujar_chart_fuente()
+                _dibujar_chart_fuente(conteo_fuente)
 
     st.divider()
     st.subheader("Puntos potenciales")
