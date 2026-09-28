@@ -923,18 +923,26 @@ if modulo_activo.startswith("🔁"):
                 # derecha, al pasar el mouse) para verla más grande y sin
                 # que los nombres queden cortados.
                 top5_fuente = conteo_fuente.head(5)
+                # Altura mínima generosa (y bastante espacio por barra) para
+                # que con pocas categorías (1 o 2) las barras y sus nombres
+                # no queden amontonados/superpuestos — con "cantidad" como
+                # entero se fuerzan los ticks del eje X a números enteros.
                 chart_fuente = (
                     alt.Chart(top5_fuente)
                     .mark_bar(color=_COLORES_HEX_LEYENDA.get(color_resumen, OXXO_ROJO), cornerRadiusEnd=4)
                     .encode(
-                        x=alt.X("cantidad:Q", title="Puntos"),
-                        y=alt.Y("especialista:N", title=None, sort="-x"),
+                        x=alt.X("cantidad:Q", title="Puntos", axis=alt.Axis(tickMinStep=1)),
+                        y=alt.Y(
+                            "especialista:N", title=None, sort="-x",
+                            axis=alt.Axis(labelLimit=160),
+                            scale=alt.Scale(paddingInner=0.35, paddingOuter=0.3),
+                        ),
                         tooltip=[
                             alt.Tooltip("especialista:N", title="Especialista / responsable"),
                             alt.Tooltip("cantidad:Q", title="Puntos"),
                         ],
                     )
-                    .properties(height=max(90, 26 * len(top5_fuente)))
+                    .properties(height=max(120, 42 * len(top5_fuente)))
                 )
                 st.altair_chart(chart_fuente, use_container_width=True)
                 if len(conteo_fuente) > 5:
