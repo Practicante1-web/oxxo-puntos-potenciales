@@ -657,6 +657,15 @@ def _parsear_formato_seguimiento(crudo: pd.DataFrame, fuente: str) -> pd.DataFra
     normalizado["especialista"] = (
         _col_por_nombres(crudo, ["Especialista asignado"]).fillna("").astype(str).str.strip()
     )
+    # Un punto puede llegar sin especialista asignado todavía (recién
+    # llegó, solo se sabe quién lo localizó) — mientras tanto, se usa el
+    # Localizador como responsable, para que el punto no desaparezca de
+    # "Puntos registrados por responsable" solo por no tener especialista
+    # asignado aún. En cuanto se le asigne especialista en el Excel, pasa
+    # a contar por esa persona en vez del localizador.
+    localizador_valido = localizador.where(localizador.str.lower() != "no aplica", "")
+    especialista_vacio = normalizado["especialista"].str.strip() == ""
+    normalizado.loc[especialista_vacio, "especialista"] = localizador_valido[especialista_vacio]
     normalizado["ciudad"] = _col_por_nombres(crudo, ["Ciudad"]).apply(normalizar_ciudad)
     normalizado["upz"] = _col_por_nombres(crudo, ["Plaza"]).fillna("").astype(str).str.strip()
     normalizado["local_identificado"] = (
