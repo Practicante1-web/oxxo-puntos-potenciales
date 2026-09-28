@@ -722,6 +722,16 @@ else:
 if error_fuente_url:
     st.error(f"⚠️ {error_fuente_url} (se está mostrando la última copia guardada).", icon="⚠️")
 
+# Si el archivo sí se pudo descargar pero alguna hoja en particular falló
+# al leerse (por ejemplo, una fila con un formato de columna inesperado),
+# esa fuente queda sin puntos en silencio a menos que se avise aquí — sin
+# esto, "no hay datos para graficar" se ve igual a "la fuente está vacía".
+_errores_fuentes = getattr(df, "attrs", {}).get("errores_fuentes") if df is not None else None
+if _errores_fuentes:
+    with st.expander(f"⚠️ {len(_errores_fuentes)} hoja(s) no se pudieron leer del Excel — ver detalle", expanded=True):
+        for _err in _errores_fuentes:
+            st.warning(_err, icon="⚠️")
+
 error_generadores = None
 try:
     df_generadores = _leer_generadores_cacheado()
