@@ -741,6 +741,13 @@ def leer_fuentes_modulo1(ruta_o_buffer, nombre_archivo: str = "") -> pd.DataFram
     combinado = pd.concat(partes, ignore_index=True)
     combinado["id"] = range(1, len(combinado) + 1)
     combinado = combinado.reindex(columns=COLUMNAS, fill_value="")
+    # Si alguna hoja SÍ se encontró pero falló al leerla (p. ej. una
+    # columna con un formato inesperado en alguna fila), esa fuente
+    # queda simplemente sin puntos — sin tumbar la carga de las demás —
+    # pero el motivo del error no debe desaparecer en silencio: se deja
+    # aquí, en los `attrs` del DataFrame, para que la app lo pueda
+    # mostrar como aviso.
+    combinado.attrs["errores_fuentes"] = errores
     return combinado
 
 
