@@ -60,12 +60,14 @@ FUENTE_ESPECIALISTAS = "Especialistas"
 FUENTE_OPERACION = "Operación"
 FUENTE_TERCEROS = "Terceros"
 FUENTE_INMOBILIARIA = "Inmobiliaria"
+FUENTE_LOCALIZADORES = "Localizadores"
 
 FUENTE_COLOR_ICONO = {
     FUENTE_ESPECIALISTAS: "morado",
     FUENTE_OPERACION: "azul_claro",
     FUENTE_TERCEROS: "rosado",
     FUENTE_INMOBILIARIA: "verde",
+    FUENTE_LOCALIZADORES: "naranja",
 }
 
 # Valores reales que usa hoy el área en la columna "Estatus En Bitacora"
@@ -329,7 +331,8 @@ def leer_desde_url(url: str, timeout: int = 20) -> pd.DataFrame:
 def leer_fuentes_modulo1_desde_url(url: str, timeout: int = 20) -> pd.DataFrame:
     """
     Igual que leer_desde_url, pero para el Excel multi-hoja del Módulo 1
-    (Especialistas + Terceros + Operación + Inmobiliaria si existe). Usa
+    (Especialistas + Terceros + Operación + Localizadores + Inmobiliaria,
+    cada una si existe). Usa
     leer_fuentes_modulo1 para el parseo en vez de _normalizar_crudo, para
     que la conexión en vivo a OneDrive funcione igual con el archivo nuevo
     de varias hojas.
@@ -513,72 +516,15 @@ def _buscar_hoja(excel: "pd.ExcelFile", palabras_clave: list):
 
 
 def _parsear_terceros(crudo: pd.DataFrame) -> pd.DataFrame:
-    """Normaliza la hoja 'Base puntos terceros' al esquema común (COLUMNAS)."""
-    crudo = crudo.copy()
-    crudo.columns = [str(c).strip() for c in crudo.columns]
-    # El export de Excel suele dejar cientos de miles de filas "fantasma"
-    # vacías (formato aplicado a toda la columna) — se descartan antes de
-    # procesar nada, quedándose solo con las filas que sí tienen un
-    # proyecto/nombre.
-    crudo = crudo[_col_por_nombres(crudo, ["Proyecto"]).notna()].reset_index(drop=True)
-    n = len(crudo)
+    """
+    Normaliza la hoja 'Base puntos terceros' al esquema común (COLUMNAS).
 
-    coords = _col_por_nombres(crudo, ["Coordenadas"])
-    lat_lon = coords.apply(parsear_coordenada_pegada)
-    latitud = lat_lon.apply(lambda v: v[0] if v else None)
-    longitud = lat_lon.apply(lambda v: v[1] if v else None)
-
-    razon_descarte = _col_por_nombres(crudo, ["Razón de descarte"]).fillna("").astype(str).str.strip()
-    comentario_descarte = _col_por_nombres(crudo, ["Comentarios de descarte"]).fillna("").astype(str).str.strip()
-    comentario_int = _col_por_nombres(crudo, ["Comentarios Int Exp"]).fillna("").astype(str).str.strip()
-    localizador = _col_por_nombres(crudo, ["Localizador"]).fillna("").astype(str).str.strip()
-    propietario = _col_por_nombres(crudo, ["Nombre de propietario"]).fillna("").astype(str).str.strip()
-    contacto = _col_por_nombres(crudo, ["Contacto propietario"]).fillna("").astype(str).str.strip()
-
-    notas_partes = []
-    for i in range(n):
-        piezas = []
-        if localizador.iloc[i] and localizador.iloc[i].lower() != "no aplica":
-            piezas.append(f"Localizador: {localizador.iloc[i]}")
-        if propietario.iloc[i]:
-            piezas.append(f"Propietario: {propietario.iloc[i]}")
-        if contacto.iloc[i]:
-            piezas.append(f"Contacto: {contacto.iloc[i]}")
-        notas_partes.append(" · ".join(piezas))
-
-    comentarios_final = []
-    for i in range(n):
-        piezas = [p for p in [comentario_int.iloc[i], comentario_descarte.iloc[i]] if p]
-        comentarios_final.append(" | ".join(piezas))
-
-    normalizado = pd.DataFrame()
-    normalizado["fuente"] = [FUENTE_TERCEROS] * n
-    normalizado["especialista"] = (
-        _col_por_nombres(crudo, ["Especialista asignado"]).fillna("").astype(str).str.strip()
-    )
-    normalizado["ciudad"] = _col_por_nombres(crudo, ["Ciudad"]).apply(normalizar_ciudad)
-    normalizado["upz"] = _col_por_nombres(crudo, ["Plaza"]).fillna("").astype(str).str.strip()
-    normalizado["local_identificado"] = (
-        _col_por_nombres(crudo, ["Proyecto"]).fillna("").astype(str).str.strip()
-    )
-    normalizado["fecha_registro"] = pd.to_datetime(
-        _col_por_nombres(crudo, ["Fecha de recepción", "Fecha de recepcion"]), errors="coerce"
-    ).dt.date
-    normalizado["estado"] = (
-        _col_por_nombres(crudo, ["Estatus general"]).fillna("Sin estado").astype(str).str.strip()
-        .replace("", "Sin estado")
-    )
-    normalizado["estado_comite"] = razon_descarte  # se reutiliza como "por qué se descartó", si aplica
-    normalizado["latitud"] = pd.to_numeric(latitud, errors="coerce")
-    normalizado["longitud"] = pd.to_numeric(longitud, errors="coerce")
-    normalizado["practicante"] = ""
-    normalizado["tiendas_evaluadas"] = 0
-    normalizado["detalle_microsaturacion"] = ""
-    normalizado["comentarios"] = comentarios_final
-    normalizado["notas"] = notas_partes
-
-    normalizado = normalizado[normalizado["local_identificado"].str.strip() != ""].reset_index(drop=True)
-    return normalizado
+    Desde que Alisson estandarizó el formato de seguimiento (columnas
+    "Estatus", "Semáforo", "Recordatorio 1..5", etc. — el mismo que usa
+    la hoja "Base localizadores"), Terceros usa exactamente esa misma
+    estructura, así que se apoya en _parsear_formato_seguimiento.
+    """
+    return _parsear_formato_seguimiento(crudo, FUENTE_TERCEROS)
 
 
 def _parsear_operacion(crudo: pd.DataFrame) -> pd.DataFrame:
@@ -630,6 +576,112 @@ def _parsear_operacion(crudo: pd.DataFrame) -> pd.DataFrame:
     return normalizado
 
 
+def _parsear_localizadores(crudo: pd.DataFrame) -> pd.DataFrame:
+    """Normaliza la hoja "Base localizadores" al esquema común (COLUMNAS)."""
+    return _parsear_formato_seguimiento(crudo, FUENTE_LOCALIZADORES)
+
+
+def _parsear_formato_seguimiento(crudo: pd.DataFrame, fuente: str) -> pd.DataFrame:
+    """
+    Normaliza al esquema común (COLUMNAS) el formato de seguimiento que
+    Alisson estandarizó para las hojas de puntos que llegan por fuera de
+    los especialistas (columnas "Estatus", "Semáforo", "Recordatorio
+    1..5", "¿Ya respondió?", etc.) — hoy lo usan tanto "Base puntos
+    terceros" como "Base localizadores"; `fuente` dice cuál de las dos es,
+    para que cada punto quede marcado con su origen real.
+
+    Los indicadores propios de este formato (semáforo, canal,
+    recordatorios, si ya respondió el propietario) no tienen una columna
+    dedicada en el esquema común — se guardan como texto legible dentro
+    de "notas"/"comentarios" para que no se pierda esa información al
+    consultar el punto.
+    """
+    crudo = crudo.copy()
+    crudo.columns = [str(c).strip() for c in crudo.columns]
+    crudo = crudo[_col_por_nombres(crudo, ["Proyecto"]).notna()].reset_index(drop=True)
+    n = len(crudo)
+
+    coords = _col_por_nombres(crudo, ["Coordenadas"])
+    lat_lon = coords.apply(parsear_coordenada_pegada)
+    latitud = lat_lon.apply(lambda v: v[0] if v else None)
+    longitud = lat_lon.apply(lambda v: v[1] if v else None)
+
+    localizador = _col_por_nombres(crudo, ["Localizador"]).fillna("").astype(str).str.strip()
+    canal = _col_por_nombres(crudo, ["Canal"]).fillna("").astype(str).str.strip()
+    semaforo = _col_por_nombres(crudo, ["Semáforo", "Semaforo"]).fillna("").astype(str).str.strip()
+    propietario = _col_por_nombres(crudo, ["Propietario"]).fillna("").astype(str).str.strip()
+    # Cuando la columna trae números y celdas vacías mezcladas, pandas la
+    # lee como float (ej. 3123902870.0) — se quita el ".0" para que se vea
+    # como un teléfono normal.
+    telefono = (
+        _col_por_nombres(crudo, ["Teléfono", "Telefono"])
+        .apply(lambda v: str(int(v)) if isinstance(v, float) and v.is_integer() else str(v).strip())
+        .replace("nan", "")
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    ya_respondio = _col_por_nombres(crudo, ["¿Ya respondió?", "Ya respondio"]).fillna("").astype(str).str.strip()
+    total_recordatorios = pd.to_numeric(
+        _col_por_nombres(crudo, ["Total recordatorios"], 0), errors="coerce"
+    ).fillna(0).astype(int)
+    motivo_descarte = _col_por_nombres(crudo, ["Motivo descarte (categoría)", "Motivo descarte"]).fillna("").astype(str).str.strip()
+    pendiente_interno = _col_por_nombres(crudo, ["Pendiente / comentario interno"]).fillna("").astype(str).str.strip()
+    notas_seguimiento = _col_por_nombres(crudo, ["Notas del seguimiento"]).fillna("").astype(str).str.strip()
+
+    notas_partes = []
+    for i in range(n):
+        piezas = []
+        if localizador.iloc[i] and localizador.iloc[i].lower() != "no aplica":
+            piezas.append(f"Localizador: {localizador.iloc[i]}")
+        if canal.iloc[i]:
+            piezas.append(f"Canal: {canal.iloc[i]}")
+        if semaforo.iloc[i]:
+            piezas.append(f"Semáforo: {semaforo.iloc[i]}")
+        if propietario.iloc[i]:
+            piezas.append(f"Propietario: {propietario.iloc[i]}")
+        if telefono.iloc[i]:
+            piezas.append(f"Teléfono: {telefono.iloc[i]}")
+        if total_recordatorios.iloc[i] > 0:
+            respondio_txt = ya_respondio.iloc[i] if ya_respondio.iloc[i] else "No"
+            piezas.append(f"Recordatorios enviados: {total_recordatorios.iloc[i]} (¿Respondió?: {respondio_txt})")
+        notas_partes.append(" · ".join(piezas))
+
+    comentarios_final = []
+    for i in range(n):
+        piezas = [p for p in [pendiente_interno.iloc[i], motivo_descarte.iloc[i], notas_seguimiento.iloc[i]] if p]
+        comentarios_final.append(" | ".join(piezas))
+
+    normalizado = pd.DataFrame()
+    normalizado["fuente"] = [fuente] * n
+    normalizado["especialista"] = (
+        _col_por_nombres(crudo, ["Especialista asignado"]).fillna("").astype(str).str.strip()
+    )
+    normalizado["ciudad"] = _col_por_nombres(crudo, ["Ciudad"]).apply(normalizar_ciudad)
+    normalizado["upz"] = _col_por_nombres(crudo, ["Plaza"]).fillna("").astype(str).str.strip()
+    normalizado["local_identificado"] = (
+        _col_por_nombres(crudo, ["Proyecto"]).fillna("").astype(str).str.strip()
+    )
+    normalizado["fecha_registro"] = pd.to_datetime(
+        _col_por_nombres(crudo, ["Fecha recepción", "Fecha recepcion"]), errors="coerce"
+    ).dt.date
+    normalizado["estado"] = (
+        _col_por_nombres(crudo, ["Estatus"]).fillna("Sin estado").astype(str).str.strip()
+        .replace("", "Sin estado")
+    )
+    normalizado["estado_comite"] = _col_por_nombres(crudo, ["Razón de descarte"]).fillna("").astype(str).str.strip()
+    normalizado["latitud"] = pd.to_numeric(latitud, errors="coerce")
+    normalizado["longitud"] = pd.to_numeric(longitud, errors="coerce")
+    normalizado["practicante"] = ""
+    normalizado["tiendas_evaluadas"] = 0
+    normalizado["detalle_microsaturacion"] = ""
+    normalizado["comentarios"] = comentarios_final
+    normalizado["notas"] = notas_partes
+
+    normalizado = normalizado[normalizado["local_identificado"].str.strip() != ""].reset_index(drop=True)
+    return normalizado
+
+
 def leer_fuentes_modulo1(ruta_o_buffer, nombre_archivo: str = "") -> pd.DataFrame:
     """
     Lee el Excel de Módulo 1 (una hoja por fuente: especialistas/ISO,
@@ -638,9 +690,11 @@ def leer_fuentes_modulo1(ruta_o_buffer, nombre_archivo: str = "") -> pd.DataFram
     de dónde viene cada punto (ver FUENTE_ESPECIALISTAS/OPERACION/TERCEROS).
 
     Es tolerante a que las hojas no se llamen EXACTAMENTE así: busca por
-    palabras clave en el nombre de la hoja. Si alguna de las 3 no aparece,
-    simplemente no aporta puntos de esa fuente (no rompe la carga de las
-    demás) — pensado para cuando alguna fuente todavía no tiene datos.
+    palabras clave en el nombre de la hoja. Si alguna fuente no aparece
+    (por ejemplo, "Base localizadores" o "Inmobiliaria" todavía no
+    existen en el archivo), simplemente no aporta puntos de esa fuente
+    (no rompe la carga de las demás) — pensado para cuando alguna fuente
+    todavía no tiene datos.
     """
     if hasattr(ruta_o_buffer, "seek"):
         ruta_o_buffer.seek(0)
@@ -669,6 +723,13 @@ def leer_fuentes_modulo1(ruta_o_buffer, nombre_archivo: str = "") -> pd.DataFram
             partes.append(_parsear_operacion(excel.parse(sheet_name=hoja_ope)))
         except Exception as e:
             errores.append(f"Operación (hoja '{hoja_ope}'): {e}")
+
+    hoja_loc = _buscar_hoja(excel, ["localizador", "localizadores"])
+    if hoja_loc:
+        try:
+            partes.append(_parsear_localizadores(excel.parse(sheet_name=hoja_loc)))
+        except Exception as e:
+            errores.append(f"Localizadores (hoja '{hoja_loc}'): {e}")
 
     if not partes:
         detalle = ("; " + "; ".join(errores)) if errores else ""
