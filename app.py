@@ -28,6 +28,7 @@ from iconos import icon_data
 from utils import (
     FUENTE_COLOR_ICONO,
     UMBRAL_DUPLICIDAD_GENERADOR_M,
+    HOJA_TIENDAS_DEFECTO,
     UMBRAL_DUPLICIDAD_M,
     agrupar_generadores,
     buscar_coordenada_por_direccion,
@@ -41,9 +42,12 @@ from utils import (
     guardar_puntos,
     leer_fuentes_modulo1,
     leer_fuentes_modulo1_desde_url,
+    leer_tiendas_desde_url,
     leer_generadores_desde_arcgis,
     parsear_coordenada_pegada,
+    tiendas_cercanas,
 )
+from mapa_html import construir_html_mapa
 
 METADATA_PATH = Path("data/metadata.json")
 RUTA_EXCEL_BUNDLED = Path("data/Puntos_potenciales.xlsx")
@@ -227,48 +231,11 @@ def _columna_tooltip_potenciales(d: pd.DataFrame) -> pd.Series:
 CELDA_APILADO_DECIMALES = 4
 ESPACIO_ENTRE_APILADOS_PX = 26
 
-ESTILO_TOOLTIP_MAPA = {
-    "backgroundColor": "#FFFFFF",
-    "color": "#1A1A1A",
-    "fontSize": "14px",
-    "lineHeight": "1.5",
-    "padding": "10px 14px",
-    "borderRadius": "10px",
-    "border": "1px solid #D0D0D5",
-    "boxShadow": "0 4px 16px rgba(0,0,0,0.18)",
-    "maxWidth": "340px",
-    "whiteSpace": "pre-line",
-    "zIndex": "9999",
-}
-
-
 def _clave_celda(lat, lon):
     return (
         round(float(lat), CELDA_APILADO_DECIMALES),
         round(float(lon), CELDA_APILADO_DECIMALES),
     )
-
-
-def _desplazamientos_apilados(base: pd.DataFrame, resaltados):
-    """
-    Calcula, para cada pin, cuántos pixeles correrlo hacia el lado para que
-    los pines apilados queden uno junto al otro. Devuelve dos diccionarios:
-    {índice de fila de `base`: [dx, dy]} y {posición en `resaltados`: [dx, dy]}.
-    Un pin que está solo queda en [0, 0] (sin moverse).
-    """
-    grupos = {}
-    for idx, lat, lon in zip(base.index, base["latitud"], base["longitud"]):
-        grupos.setdefault(_clave_celda(lat, lon), []).append(("b", idx))
-    for i, item in enumerate(resaltados):
-        grupos.setdefault(_clave_celda(item[0], item[1]), []).append(("r", i))
-
-    off_base, off_res = {}, {}
-    for miembros in grupos.values():
-        n = len(miembros)
-        for slot, (tipo, ref) in enumerate(miembros):
-            dx = (slot - (n - 1) / 2) * ESPACIO_ENTRE_APILADOS_PX if n > 1 else 0
-            (off_base if tipo == "b" else off_res)[ref] = [dx, 0]
-    return off_base, off_res
 
 
 COLUMNAS_APILADOS = ["Cuántos", "Fuentes", "Puntos en ese lugar", "Coordenada"]
@@ -307,80 +274,48 @@ def detectar_apilados(df, fuentes_activas) -> pd.DataFrame:
     return pd.DataFrame(filas).sort_values("Cuántos", ascending=False).reset_index(drop=True)
 
 
-def renderizar_mapa_general(df, fuentes_activas, punto_resaltado=None, key="mapa_general", altura=620, centro=None, solo_ids=None):
+def renderizar_mapa_general(
+    df, fuentes_activas, punto_resaltado=None, key="mapa_general", altura=620,
+    centro=None, solo_ids=None, df_tiendas=None, mostrar_capas_vacias=True,
+):
     """
-    Dibuja el mapa combinado del Módulo 1: una capa por cada fuente activa
-    (Especialistas=morado, Operación=azul, Terceros=rosado,
-    Inmobiliaria=verde, Localizadores=naranja). NUNCA incluye generadores —
-    esos viven solo en el Módulo 2.
+    Dibuja el mapa combinado del Módulo 1 como una página de mapa propia
+    (ver mapa_html.py): una capa por cada fuente (Especialistas=morado,
+    Operación=azul, Terceros=rosado, Inmobiliaria=verde, Localizadores=
+    naranja) y, si se dan, las tiendas OXXO (abiertas, firmadas, cerradas).
+    NUNCA incluye generadores — esos viven solo en el Módulo 2.
 
-    punto_resaltado puede ser un único (lat, lon, etiqueta) o una lista de
-    varios, para resaltar un punto buscado (o un par de posibles duplicados)
-    en rojo. Los pines que caen en el mismo lugar se abren en abanico para
-    que ninguno quede tapado.
+    - punto_resaltado: un (lat, lon, etiqueta[, info]) o una lista de ellos;
+      se dibujan en ROJO, encima de todo.
+    - Los pines que caen en el mismo lugar se abren en abanico, y la tarjeta
+      de información siempre queda dentro del marco del mapa.
+    - Las capas se prenden y apagan dentro del propio mapa.
     """
-    capas = []
     resaltados = _resaltados_a_lista(punto_resaltado)
 
-    base = pd.DataFrame(columns=["latitud", "longitud", "fuente"])
+    puntos = pd.DataFrame()
     if df is not None and not df.empty:
-        base = df[df["fuente"].isin(fuentes_activas)].dropna(subset=["latitud", "longitud"])
+        puntos = df[df["fuente"].isin(fuentes_activas)]
         if solo_ids is not None:
-            base = base[base["id"].isin(solo_ids)]
-        base = base.reset_index(drop=True)
+            puntos = puntos[puntos["id"].isin(solo_ids)]
 
-    off_base, off_res = _desplazamientos_apilados(base, resaltados)
+    colores_fuente = dict(FUENTE_COLOR_ICONO)
+    if not mostrar_capas_vacias:
+        presentes = set(puntos["fuente"]) if len(puntos) else set()
+        colores_fuente = {f: c for f, c in colores_fuente.items() if f in presentes}
 
-    for fuente, color in FUENTE_COLOR_ICONO.items():
-        d = base[base["fuente"] == fuente].copy()
-        if d.empty:
-            continue
-        d["tooltip_text"] = _columna_tooltip_fuente(d)
-        capas.append(_capa_pines(d, color, desplazamientos=[off_base[i] for i in d.index]))
-
-    if resaltados:
-        d = pd.DataFrame(
-            [{"latitud": item[0], "longitud": item[1], "tooltip_text": _texto_tooltip_resaltado(item)} for item in resaltados]
-        )
-        desp_res = [off_res[i] for i in range(len(resaltados))]
-        capas.append(_capa_pines(d, "rojo", size=TAMANO_PIN_RESALTADO_PX, desplazamientos=desp_res))
-        _capa_texto = _capa_texto_resaltados(resaltados, desp_res)
-        if _capa_texto is not None:
-            capas.append(_capa_texto)
-        if len(resaltados) == 1:
-            vista = pdk.ViewState(latitude=resaltados[0][0], longitude=resaltados[0][1], zoom=16)
-        else:
-            vista = pdk.ViewState(
-                latitude=sum(r[0] for r in resaltados) / len(resaltados),
-                longitude=sum(r[1] for r in resaltados) / len(resaltados),
-                zoom=14,
-            )
-    elif centro is not None:
-        vista = pdk.ViewState(latitude=centro[0], longitude=centro[1], zoom=centro[2])
-    else:
-        vista = pdk.ViewState(latitude=BOGOTA_LAT, longitude=BOGOTA_LON, zoom=ZOOM_BOGOTA_DEFAULT)
-
-    if not capas:
-        st.info("No hay ninguna capa para mostrar con la selección actual.")
-        return
-
-    st.pydeck_chart(
-        pdk.Deck(
-            layers=capas,
-            initial_view_state=vista,
-            tooltip={"text": "{tooltip_text}", "style": ESTILO_TOOLTIP_MAPA},
-            map_style="light",
-        ),
-        key=key,
-        height=altura,
+    html_mapa = construir_html_mapa(
+        puntos, colores_fuente, _COLORES_HEX_LEYENDA,
+        resaltados=resaltados, tiendas=df_tiendas, centro=centro, altura=altura,
     )
+    components.html(html_mapa, height=altura + 4, scrolling=False)
 
 
 def mostrar_leyenda_fuentes(incluir_resaltado=False):
     """Fila de chips explicando qué significa cada color de pin en el mapa general."""
     chips = [chip_leyenda(color, fuente) for fuente, color in FUENTE_COLOR_ICONO.items()]
     if incluir_resaltado:
-        chips.append(chip_leyenda("rojo", "<b>Punto buscado</b>"))
+        chips.append(chip_leyenda("rojo", "El punto que acabas de buscar"))
     st.markdown("".join(chips), unsafe_allow_html=True)
 
 
@@ -604,21 +539,6 @@ st.markdown(
         color: {OXXO_TEXTO} !important;
     }}
 
-    /* Mapa (pydeck): el cuadro de información al pasar el mouse siempre por encima y legible */
-    [data-testid="stDeckGlJsonChart"],
-    [data-testid="stDeckGlJsonChart"] > div,
-    [data-testid="stDeckGlJsonChart"] > div > div,
-    [data-testid="stDeckGlJsonChart"] > div > div > div {{
-        overflow: visible !important;
-    }}
-    [data-testid="stDeckGlJsonChart"] {{
-        position: relative;
-    }}
-    .deck-tooltip {{
-        z-index: 9999 !important;
-        pointer-events: none !important;
-    }}
-
     /* Tablita de leyenda de colores (además de los chips) */
     .tabla-leyenda {{
         border-collapse: collapse;
@@ -786,6 +706,12 @@ def _leer_fuentes_modulo1_desde_url_cacheado(url: str):
     return leer_fuentes_modulo1_desde_url(url)
 
 
+@st.cache_data(show_spinner="Cargando las tiendas OXXO...", ttl=TTL_CACHE_DATOS)
+def _leer_tiendas_cacheado(url: str, hoja: str):
+    """Tiendas OXXO (abiertas / firmadas / cerradas) desde la hoja indicada del Excel de tiendas."""
+    return leer_tiendas_desde_url(url, hoja)
+
+
 @st.cache_data(show_spinner="Consultando la capa de generadores...", ttl=TTL_CACHE_DATOS)
 def _leer_generadores_cacheado():
     """
@@ -874,6 +800,26 @@ if _errores_fuentes:
         for _err in _errores_fuentes:
             st.warning(_err, icon="⚠️")
 
+# Tiendas OXXO (hoja "Jun"): link propio en los Secrets (url_tiendas_oxxo) y,
+# si no existe, se intenta con la hoja "Jun" del mismo Excel de puntos. Si
+# falla, la app sigue igual, solo que sin tiendas en el mapa.
+url_tiendas_secreta = ""
+hoja_tiendas = HOJA_TIENDAS_DEFECTO
+try:
+    url_tiendas_secreta = st.secrets.get("url_tiendas_oxxo", "")
+    hoja_tiendas = st.secrets.get("hoja_tiendas", HOJA_TIENDAS_DEFECTO)
+except Exception:
+    pass
+df_tiendas = None
+error_tiendas = None
+_url_tiendas = url_tiendas_secreta or url_secreta
+if _url_tiendas:
+    try:
+        df_tiendas = _leer_tiendas_cacheado(_url_tiendas, hoja_tiendas)
+    except Exception as e:
+        if url_tiendas_secreta:  # solo se avisa si ella configuró ese link a propósito
+            error_tiendas = str(e)
+
 error_generadores = None
 try:
     df_generadores = _leer_generadores_cacheado()
@@ -906,6 +852,7 @@ def _refrescar_puntos_desde_url() -> bool:
     qué módulo esté Alisson, siempre puede traer los datos nuevos.
     """
     _leer_fuentes_modulo1_desde_url_cacheado.clear()
+    _leer_tiendas_cacheado.clear()
     _url_para_refrescar = url_secreta or metadata.get("url_fuente", "")
     try:
         nuevo_df = _leer_fuentes_modulo1_desde_url_cacheado(_url_para_refrescar)
@@ -1093,10 +1040,11 @@ if modulo_activo.startswith("🔁"):
     st.divider()
     st.subheader("🗺️ Mapa y revisión de puntos")
     st.write(
-        "Aquí están todos los puntos que llegan: **especialistas, "
-        "localizadores, terceros, operación e inmobiliaria**. Busca uno por "
-        "nombre o por coordenada: aparece en **rojo** en el mapa y abajo "
-        "ves si hay algo cerca o si está libre para analizar."
+        "Aquí están todos los puntos que llegan (**especialistas, "
+        "localizadores, terceros, operación e inmobiliaria**) y las tiendas "
+        "OXXO (abiertas, firmadas y cerradas). Busca un punto por nombre o "
+        "por coordenada: aparece en **rojo** en el mapa y ves si hay algo "
+        "cerca o si está libre para analizar."
     )
 
     def _limpiar_busqueda_mapa():
@@ -1262,29 +1210,69 @@ if modulo_activo.startswith("🔁"):
                 "Por qué aparece": cercanos["coincide_por"].values,
             })
             st.dataframe(tabla_cercanos, use_container_width=True, hide_index=True)
+
+        if df_tiendas is not None and len(df_tiendas):
+            tiendas_cerca = tiendas_cercanas(df_tiendas, lat_c, lon_c, 300)
+            if tiendas_cerca.empty:
+                st.caption("🏪 No hay tiendas OXXO (abiertas, firmadas ni cerradas) a menos de 300 m de este punto.")
+            else:
+                st.markdown(f"**🏪 Tiendas OXXO a menos de 300 m ({len(tiendas_cerca)}):**")
+                st.dataframe(
+                    pd.DataFrame({
+                        "Estado": tiendas_cerca["estado_tienda"].values,
+                        "Tienda": tiendas_cerca["nombre"].replace("", "—").values,
+                        "Ciudad": tiendas_cerca["ciudad"].replace("", "—").values,
+                        "Dirección": tiendas_cerca["direccion"].replace("", "—").values,
+                        "Distancia": [f"{d:.0f} m" for d in tiendas_cerca["distancia_m"]],
+                    }),
+                    use_container_width=True, hide_index=True,
+                )
         st.button("✖ Quitar la búsqueda", key="quitar_busqueda_mapa_unico", on_click=_limpiar_busqueda_mapa)
 
-    # 3) El mapa con todos los puntos (el buscado, en rojo)
-    st.markdown("##### Mapa de todos los puntos")
-    capas_mapa = st.multiselect(
-        "Fuentes que se muestran en el mapa",
-        list(FUENTE_COLOR_ICONO.keys()),
-        default=list(FUENTE_COLOR_ICONO.keys()),
-        key="capas_mapa_unico",
-    )
-    mostrar_leyenda_fuentes(incluir_resaltado=consulta_punto is not None)
+    # 3) El mapa con todos los puntos y tiendas (el buscado, en rojo)
+    st.markdown("##### Mapa")
     renderizar_mapa_general(
-        df, fuentes_activas=capas_mapa, punto_resaltado=resaltado_mapa,
-        key=clave_mapa, altura=620,
+        df, fuentes_activas=list(FUENTE_COLOR_ICONO.keys()), punto_resaltado=resaltado_mapa,
+        key=clave_mapa, altura=640, df_tiendas=df_tiendas,
     )
     st.caption(
-        "Pasa el mouse sobre un pin para ver su información. Si dos o más "
-        "puntos caen en el mismo lugar, se abren uno al lado del otro para "
-        "que ninguno quede tapado."
+        "Pasa el mouse sobre un pin o una tienda para ver su información "
+        "(clic para dejar la tarjeta fija). Arriba del mapa puedes prender y "
+        "apagar cada capa, los semáforos, el tamaño de las letras y cambiar a "
+        "satélite. Si dos o más puntos caen en el mismo lugar, se abren uno al "
+        "lado del otro para que ninguno quede tapado."
     )
+    if error_tiendas:
+        st.warning(f"No se pudieron cargar las tiendas OXXO: {error_tiendas}", icon="⚠️")
+    elif df_tiendas is None:
+        st.caption(
+            "🏪 Las tiendas OXXO todavía no están conectadas (falta el link de "
+            "la hoja con las tiendas abiertas, firmadas y cerradas)."
+        )
+    else:
+        _diag_t = getattr(df_tiendas, "attrs", {}).get("diagnostico", {})
+        _por_estado = _diag_t.get("por_estado", {})
+        with st.expander(
+            f"🏪 Tiendas OXXO cargadas: {len(df_tiendas)} "
+            f"({', '.join(f'{v} {k.lower()}s' for k, v in _por_estado.items()) or 'ninguna'})"
+        ):
+            if _diag_t.get("error"):
+                st.error(_diag_t["error"])
+            st.caption(
+                f"Hoja leída: {df_tiendas.attrs.get('hoja', '—')} · columna de estado usada: "
+                f"{_diag_t.get('columna_estado') or 'no encontré ninguna'}"
+            )
+            if _diag_t.get("sin_coordenada_valida"):
+                st.caption(f"{_diag_t['sin_coordenada_valida']} fila(s) sin coordenada válida, no se dibujan.")
+            if _diag_t.get("sin_estado_reconocido"):
+                st.caption(
+                    f"{_diag_t['sin_estado_reconocido']} fila(s) con un estado que no reconozco "
+                    f"(no se dibujan): {_diag_t.get('estados_no_reconocidos', {})}"
+                )
+            st.caption("Columnas de la hoja: " + ", ".join(map(str, _diag_t.get("columnas", []))))
 
     # 4) Aviso: puntos que están uno encima del otro en el mismo lugar.
-    apilados = detectar_apilados(df, capas_mapa)
+    apilados = detectar_apilados(df, list(FUENTE_COLOR_ICONO.keys()))
     if not apilados.empty:
         st.warning(
             f"⚠️ Hay {len(apilados)} lugar(es) con más de un punto en el mismo "
@@ -1310,7 +1298,7 @@ if modulo_activo.startswith("🔁"):
                     punto_resaltado=None,
                     key=f"mapa_apilados_{filas_sel_apilados[0]}_{grupo['Coordenada']}",
                     altura=460, centro=(grupo["_lat"], grupo["_lon"], 18),
-                    solo_ids=list(grupo["_ids"]),
+                    solo_ids=list(grupo["_ids"]), mostrar_capas_vacias=False,
                 )
                 st.dataframe(
                     pd.DataFrame({
@@ -1387,7 +1375,7 @@ if modulo_activo.startswith("🔁"):
                     ),
                 ],
                 key="mapa_duplicado_m1_seleccionado",
-                altura=480,
+                altura=480, mostrar_capas_vacias=False,
             )
 
 
