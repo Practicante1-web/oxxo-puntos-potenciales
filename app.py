@@ -14,6 +14,7 @@ vivo a un link de OneDrive (igual mecanismo que el Excel de puente que ya
 se usaba antes, ahora aplicado al archivo de varias hojas).
 """
 
+import html as _html
 import json
 from datetime import datetime
 from pathlib import Path
@@ -26,21 +27,17 @@ import streamlit.components.v1 as components
 
 from iconos import icon_data
 from utils import (
-    CRITERIOS_INMOBILIARIA,
     FUENTE_COLOR_ICONO,
-    RAZONES_DESCARTE_INMOBILIARIA,
     UMBRAL_DUPLICIDAD_GENERADOR_M,
     UMBRAL_DUPLICIDAD_M,
     agrupar_generadores,
     buscar_coordenada_por_direccion,
-    buscar_lugar,
     buscar_por_nombre,
     cargar_generadores_cache,
     cargar_puntos,
     detectar_coincidencias,
     detectar_duplicados_potenciales,
     detectar_generadores_coincidentes,
-    evaluar_punto_inmobiliario,
     guardar_generadores,
     guardar_puntos,
     leer_fuentes_modulo1,
@@ -90,23 +87,33 @@ TAMANO_PIN_PX = 30
 TAMANO_PIN_RESALTADO_PX = 42
 
 
-def _capa_pines(d: pd.DataFrame, color_key: str, size: int = TAMANO_PIN_PX) -> pdk.Layer:
+def _capa_pines(
+    d: pd.DataFrame, color_key: str, size: int = TAMANO_PIN_PX, desplazamientos=None,
+) -> pdk.Layer:
     """
     Arma una capa de pines (ícono en forma de gota, como en Google Maps)
     para el color dado. color_key es una de las claves de iconos.py:
     morado, azul_claro, rosado, verde, naranja, rojo, azul_repetido, gris.
+
+    `desplazamientos` (opcional) es una lista [dx, dy] en PIXELES, una por
+    fila de `d` — se usa para abrir en abanico los pines que caen en el
+    mismo lugar, así ninguno queda tapado por otro.
     """
     d = d.copy()
     d["icon_data"] = [icon_data(color_key, size)] * len(d)
+    extra = {}
+    if desplazamientos is not None:
+        d["desplazamiento"] = list(desplazamientos)
+        extra["get_pixel_offset"] = "desplazamiento"
     return pdk.Layer(
         "IconLayer", data=d, get_position="[longitud, latitud]",
         get_icon="icon_data", get_size=size, size_units="pixels",
         size_min_pixels=max(14, size - 10), size_max_pixels=size + 16,
-        pickable=True,
+        pickable=True, **extra,
     )
 
 
-def _capa_texto_resaltados(resaltados):
+def _capa_texto_resaltados(resaltados, desplazamientos=None):
     """
     Etiqueta de texto (nombre CORTO) que aparece DIRECTAMENTE sobre el
     mapa para cada punto resaltado (rojo) — así el nombre se ve de una
@@ -124,6 +131,9 @@ def _capa_texto_resaltados(resaltados):
     d = pd.DataFrame(
         [{"latitud": item[0], "longitud": item[1], "texto": str(item[2])} for item in resaltados]
     )
+    d["desplazamiento"] = [
+        [(desplazamientos[i][0] if desplazamientos else 0), -26] for i in range(len(resaltados))
+    ]
     # Nota: no se fijan get_text_anchor / get_alignment_baseline a mano —
     # pydeck convierte cualquier string de un prop "get_*" en un accesor
     # por fila (para leer columnas de los datos), así que un valor
@@ -133,7 +143,7 @@ def _capa_texto_resaltados(resaltados):
     return pdk.Layer(
         "TextLayer", data=d, get_position="[longitud, latitud]",
         get_text="texto", get_size=15, get_color=[20, 20, 20, 255],
-        get_pixel_offset=[0, -26],
+        get_pixel_offset="desplazamiento",
         pickable=False,
     )
 
@@ -154,24 +164,36 @@ def _resaltados_a_lista(punto_resaltado):
     return list(punto_resaltado)
 
 
+def _esc(valor) -> str:
+    """Escapa texto para meterlo en el HTML del tooltip (nombres con < > & no rompen nada)."""
+    return _html.escape(str(valor))
+
+
 def _texto_tooltip_resaltado(item) -> str:
-    """Arma el texto del tooltip (al pasar el mouse) para un punto resaltado, incluyendo la info extra si se dio."""
-    etiqueta_h = item[2]
-    texto = f"🔎 {etiqueta_h}"
+    """Arma el tooltip (HTML, al pasar el mouse) para un punto resaltado, incluyendo la info extra si se dio."""
+    partes = [f"<b>🔎 {_esc(item[2])}</b>"]
     if len(item) > 3 and item[3]:
-        texto = texto + "\n" + str(item[3])
-    return texto
+        partes += [_esc(linea) for linea in str(item[3]).split("\n") if linea.strip()]
+    return "<br>".join(partes)
+
+
+def _celda_tooltip(d: pd.DataFrame, columna: str) -> pd.Series:
+    """Columna de texto lista para el tooltip: vacíos como '—' y todo escapado."""
+    if columna not in d.columns:
+        return pd.Series(["—"] * len(d), index=d.index)
+    return d[columna].fillna("").astype(str).str.strip().replace("", "—").map(_esc)
 
 
 def _columna_tooltip_fuente(d: pd.DataFrame) -> pd.Series:
-    texto = "📍 " + d["local_identificado"].astype(str)
-    texto = texto + "\nFuente: " + d["fuente"].astype(str)
-    if "especialista" in d.columns:
-        texto = texto + "\nResponsable: " + d["especialista"].replace("", "—").astype(str)
-    if "estado" in d.columns:
-        texto = texto + "\nEstado: " + d["estado"].replace("", "—").astype(str)
-    if "ciudad" in d.columns:
-        texto = texto + "\nCiudad: " + d["ciudad"].replace("", "—").astype(str)
+    """Tooltip HTML con toda la info del punto: nombre, fuente, responsable, estado, fecha, ciudad y coordenada."""
+    texto = "<b>📍 " + _celda_tooltip(d, "local_identificado") + "</b>"
+    texto = texto + "<br>Fuente: <b>" + _celda_tooltip(d, "fuente") + "</b>"
+    texto = texto + "<br>Responsable: " + _celda_tooltip(d, "especialista")
+    if "practicante" in d.columns:
+        texto = texto + "<br>Practicante: " + _celda_tooltip(d, "practicante")
+    texto = texto + "<br>Estado: " + _celda_tooltip(d, "estado")
+    texto = texto + "<br>Fecha de registro: " + _celda_tooltip(d, "fecha_registro")
+    texto = texto + "<br>Ciudad: " + _celda_tooltip(d, "ciudad")
     return texto
 
 
@@ -203,38 +225,129 @@ def _columna_tooltip_potenciales(d: pd.DataFrame) -> pd.Series:
     return texto
 
 
-def renderizar_mapa_general(df, fuentes_activas, punto_resaltado=None, key="mapa_general"):
+# Cuando varios puntos caen en el MISMO lugar (por ejemplo, uno de Operación
+# justo encima de uno de Especialistas), el de arriba tapa a los demás. Para
+# que todos se vean, esos pines se abren en abanico, uno al lado del otro.
+# Una "celda" de 4 decimales equivale a ~11 m: lo que caiga dentro cuenta
+# como "el mismo lugar".
+CELDA_APILADO_DECIMALES = 4
+ESPACIO_ENTRE_APILADOS_PX = 26
+
+ESTILO_TOOLTIP_MAPA = {
+    "backgroundColor": "#FFFFFF",
+    "color": "#1A1A1A",
+    "fontSize": "14px",
+    "lineHeight": "1.5",
+    "padding": "10px 14px",
+    "borderRadius": "10px",
+    "border": "1px solid #D0D0D5",
+    "boxShadow": "0 4px 16px rgba(0,0,0,0.18)",
+    "maxWidth": "340px",
+    "whiteSpace": "normal",
+    "zIndex": "9999",
+}
+
+
+def _clave_celda(lat, lon):
+    return (
+        round(float(lat), CELDA_APILADO_DECIMALES),
+        round(float(lon), CELDA_APILADO_DECIMALES),
+    )
+
+
+def _desplazamientos_apilados(base: pd.DataFrame, resaltados):
+    """
+    Calcula, para cada pin, cuántos pixeles correrlo hacia el lado para que
+    los pines apilados queden uno junto al otro. Devuelve dos diccionarios:
+    {índice de fila de `base`: [dx, dy]} y {posición en `resaltados`: [dx, dy]}.
+    Un pin que está solo queda en [0, 0] (sin moverse).
+    """
+    grupos = {}
+    for idx, lat, lon in zip(base.index, base["latitud"], base["longitud"]):
+        grupos.setdefault(_clave_celda(lat, lon), []).append(("b", idx))
+    for i, item in enumerate(resaltados):
+        grupos.setdefault(_clave_celda(item[0], item[1]), []).append(("r", i))
+
+    off_base, off_res = {}, {}
+    for miembros in grupos.values():
+        n = len(miembros)
+        for slot, (tipo, ref) in enumerate(miembros):
+            dx = (slot - (n - 1) / 2) * ESPACIO_ENTRE_APILADOS_PX if n > 1 else 0
+            (off_base if tipo == "b" else off_res)[ref] = [dx, 0]
+    return off_base, off_res
+
+
+COLUMNAS_APILADOS = ["Cuántos", "Fuentes", "Puntos en ese lugar", "Coordenada"]
+
+
+def detectar_apilados(df, fuentes_activas) -> pd.DataFrame:
+    """
+    Lugares donde hay MÁS DE UN punto prácticamente en el mismo sitio (≈ 11 m),
+    sin importar de qué fuente sean — para avisar cuando, por ejemplo, un
+    punto de Operación quedó encima de uno de Especialistas.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=COLUMNAS_APILADOS)
+    base = df[df["fuente"].isin(fuentes_activas)].dropna(subset=["latitud", "longitud"]).copy()
+    if base.empty:
+        return pd.DataFrame(columns=COLUMNAS_APILADOS)
+    base["_celda"] = [_clave_celda(a, b) for a, b in zip(base["latitud"], base["longitud"])]
+    filas = []
+    for _, g in base.groupby("_celda"):
+        if len(g) < 2:
+            continue
+        filas.append({
+            "Cuántos": len(g),
+            "Fuentes": ", ".join(sorted(g["fuente"].astype(str).unique())),
+            "Puntos en ese lugar": " · ".join(
+                f"{n} ({f})" for n, f in zip(g["local_identificado"].astype(str), g["fuente"].astype(str))
+            ),
+            "Coordenada": f"{g['latitud'].mean():.6f}, {g['longitud'].mean():.6f}",
+        })
+    if not filas:
+        return pd.DataFrame(columns=COLUMNAS_APILADOS)
+    return pd.DataFrame(filas).sort_values("Cuántos", ascending=False).reset_index(drop=True)
+
+
+def renderizar_mapa_general(df, fuentes_activas, punto_resaltado=None, key="mapa_general", altura=620):
     """
     Dibuja el mapa combinado del Módulo 1: una capa por cada fuente activa
     (Especialistas=morado, Operación=azul, Terceros=rosado,
-    Inmobiliaria=verde). NUNCA incluye generadores — el Módulo 1 es solo
-    para puntos que llegan (Especialistas/Operación/Terceros/Inmobiliaria).
+    Inmobiliaria=verde, Localizadores=naranja). NUNCA incluye generadores —
+    esos viven solo en el Módulo 2.
 
     punto_resaltado puede ser un único (lat, lon, etiqueta) o una lista de
-    varios, para resaltar un par de posibles duplicados a la vez.
+    varios, para resaltar un punto buscado (o un par de posibles duplicados)
+    en rojo. Los pines que caen en el mismo lugar se abren en abanico para
+    que ninguno quede tapado.
     """
     capas = []
-
-    if df is not None and not df.empty:
-        base = df.dropna(subset=["latitud", "longitud"])
-        for fuente, color in FUENTE_COLOR_ICONO.items():
-            if fuente in fuentes_activas:
-                d = base[base["fuente"] == fuente].copy()
-                if not d.empty:
-                    d["tooltip_text"] = _columna_tooltip_fuente(d)
-                    capas.append(_capa_pines(d, color))
-
     resaltados = _resaltados_a_lista(punto_resaltado)
+
+    base = pd.DataFrame(columns=["latitud", "longitud", "fuente"])
+    if df is not None and not df.empty:
+        base = df[df["fuente"].isin(fuentes_activas)].dropna(subset=["latitud", "longitud"]).reset_index(drop=True)
+
+    off_base, off_res = _desplazamientos_apilados(base, resaltados)
+
+    for fuente, color in FUENTE_COLOR_ICONO.items():
+        d = base[base["fuente"] == fuente].copy()
+        if d.empty:
+            continue
+        d["tooltip_html"] = _columna_tooltip_fuente(d)
+        capas.append(_capa_pines(d, color, desplazamientos=[off_base[i] for i in d.index]))
+
     if resaltados:
         d = pd.DataFrame(
-            [{"latitud": item[0], "longitud": item[1], "tooltip_text": _texto_tooltip_resaltado(item)} for item in resaltados]
+            [{"latitud": item[0], "longitud": item[1], "tooltip_html": _texto_tooltip_resaltado(item)} for item in resaltados]
         )
-        capas.append(_capa_pines(d, "rojo", size=TAMANO_PIN_RESALTADO_PX))
-        _capa_texto = _capa_texto_resaltados(resaltados)
+        desp_res = [off_res[i] for i in range(len(resaltados))]
+        capas.append(_capa_pines(d, "rojo", size=TAMANO_PIN_RESALTADO_PX, desplazamientos=desp_res))
+        _capa_texto = _capa_texto_resaltados(resaltados, desp_res)
         if _capa_texto is not None:
             capas.append(_capa_texto)
         if len(resaltados) == 1:
-            vista = pdk.ViewState(latitude=resaltados[0][0], longitude=resaltados[0][1], zoom=15)
+            vista = pdk.ViewState(latitude=resaltados[0][0], longitude=resaltados[0][1], zoom=16)
         else:
             vista = pdk.ViewState(
                 latitude=sum(r[0] for r in resaltados) / len(resaltados),
@@ -252,10 +365,11 @@ def renderizar_mapa_general(df, fuentes_activas, punto_resaltado=None, key="mapa
         pdk.Deck(
             layers=capas,
             initial_view_state=vista,
-            tooltip={"text": "{tooltip_text}"},
+            tooltip={"html": "{tooltip_html}", "style": ESTILO_TOOLTIP_MAPA},
             map_style="light",
         ),
         key=key,
+        height=altura,
     )
 
 
@@ -263,7 +377,7 @@ def mostrar_leyenda_fuentes(incluir_resaltado=False):
     """Fila de chips explicando qué significa cada color de pin en el mapa general."""
     chips = [chip_leyenda(color, fuente) for fuente, color in FUENTE_COLOR_ICONO.items()]
     if incluir_resaltado:
-        chips.append(chip_leyenda("rojo", "El punto que acabas de buscar"))
+        chips.append(chip_leyenda("rojo", "<b>Punto buscado</b>"))
     st.markdown("".join(chips), unsafe_allow_html=True)
 
 
@@ -475,6 +589,27 @@ st.markdown(
         min-width: 10px;
         border-radius: 50%;
         display: inline-block;
+    }}
+
+    /* Letra más clara en textos de apoyo y etiquetas */
+    [data-testid="stCaptionContainer"] {{
+        font-size: 14px !important;
+        color: #55555B !important;
+    }}
+    [data-testid="stWidgetLabel"] p {{
+        font-size: 15px !important;
+        color: {OXXO_TEXTO} !important;
+    }}
+
+    /* Mapa (pydeck): el cuadro de información al pasar el mouse siempre por encima y legible */
+    [data-testid="stDeckGlJsonChart"] {{
+        position: relative;
+        border-radius: 12px;
+        overflow: visible;
+    }}
+    .deck-tooltip {{
+        z-index: 9999 !important;
+        pointer-events: none !important;
     }}
 
     /* Tablita de leyenda de colores (además de los chips) */
@@ -949,100 +1084,86 @@ if modulo_activo.startswith("🔁"):
                     st.caption(f"Mostrando los 5 con más puntos, de {len(conteo_fuente)} responsables.")
 
     st.divider()
-    st.subheader("Puntos potenciales")
+    st.subheader("🗺️ Mapa y revisión de puntos")
     st.write(
-        "Revisa qué puntos potenciales — de especialistas, operación, "
-        "terceros o inmobiliarias — están repetidos: misma coordenada, o "
-        "tan cerca que probablemente son el mismo lugar."
+        "Aquí están todos los puntos que llegan: **especialistas, "
+        "localizadores, terceros, operación e inmobiliaria**. Busca uno por "
+        "nombre o por coordenada: aparece en **rojo** en el mapa y abajo "
+        "ves si hay algo cerca o si está libre para analizar."
     )
 
-    st.markdown("#### 🔎 Revisar un punto específico")
-    st.write(
-        "Busca uno en particular (o pega su coordenada) para ver si ya "
-        "existe algo parecido cerca — así detectas la posible duplicidad "
-        "ANTES de registrarlo."
-    )
-    st.caption(
-        "Aquí no se busca por dirección: la búsqueda de direcciones no "
-        "siempre cae en el punto exacto. Si solo tienes la dirección, "
-        "conviértela primero a coordenada en Google Maps (clic derecho → "
-        "copiar coordenadas) y pégala aquí."
-    )
+    def _limpiar_busqueda_mapa():
+        for _k in ("resultado_busqueda_nombre", "resultado_busqueda_punto", "error_busqueda_punto"):
+            st.session_state.pop(_k, None)
 
     modo_busqueda = st.radio(
         "¿Cómo quieres buscar?",
         ["Por nombre", "Por coordenada"],
         horizontal=True,
-        key="modo_busqueda_tab1",
-        label_visibility="collapsed",
+        key="modo_busqueda_mapa_unico",
     )
 
-    consulta_punto = None  # se llena si se elige un resultado válido
+    consulta_punto = None  # se llena si hay un punto válido para mostrar en rojo
+    id_punto_buscado = None  # para no contar el propio punto como "cercano"
 
     if modo_busqueda == "Por nombre":
-        nombre_busqueda = st.text_input(
-            "Nombre del local a buscar", key="busqueda_nombre",
+        col_texto, col_boton = st.columns([5, 1], vertical_alignment="bottom")
+        nombre_busqueda = col_texto.text_input(
+            "Nombre del punto", key="busqueda_nombre_mapa_unico",
             placeholder="Ej. Toberin 168",
         )
-        if st.button("🔍 Buscar", type="primary", key="buscar_por_nombre_btn"):
-            resultado_nombre = buscar_por_nombre(df, nombre_busqueda)
-            st.session_state["resultado_busqueda_nombre"] = resultado_nombre
+        if col_boton.button("🔍 Buscar", type="primary", key="buscar_nombre_mapa_unico", use_container_width=True):
+            st.session_state["resultado_busqueda_nombre"] = buscar_por_nombre(df, nombre_busqueda)
 
         resultado_nombre = st.session_state.get("resultado_busqueda_nombre")
         if resultado_nombre is not None:
+            con_coords_nombre = resultado_nombre.dropna(subset=["latitud", "longitud"])
             if resultado_nombre.empty:
-                st.success("No hay ningún local registrado con un nombre igual o parecido.")
+                st.info(
+                    "No hay ningún punto registrado con ese nombre (ni uno "
+                    "parecido). Si tienes su coordenada, búscalo 'Por coordenada'."
+                )
             else:
-                st.warning(
-                    f"Se encontraron {len(resultado_nombre)} local(es) con nombre "
-                    "igual o muy parecido:"
-                )
-                st.dataframe(
-                    resultado_nombre[
-                        ["id", "fuente", "especialista", "ciudad", "local_identificado", "estado", "similitud_nombre"]
-                    ].rename(columns={
-                        "fuente": "Fuente", "especialista": "Especialista/responsable",
-                        "ciudad": "Ciudad", "local_identificado": "Nombre",
-                        "estado": "Estado", "similitud_nombre": "Qué tan parecido",
-                    }),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-                con_coords_nombre = resultado_nombre.dropna(subset=["latitud", "longitud"])
+                st.caption(f"Se encontraron {len(resultado_nombre)} punto(s) con nombre igual o muy parecido.")
                 if con_coords_nombre.empty:
-                    st.caption(
-                        "Ninguno de estos resultados tiene coordenadas registradas, "
-                        "así que no se puede mostrar el mapa ni Street View."
+                    st.warning(
+                        "Ninguno de esos puntos tiene coordenadas registradas, "
+                        "así que no se puede mostrar en el mapa."
                     )
                 else:
                     opciones_nombre = {
                         f"{row.local_identificado} · {row.fuente}": row.id
                         for row in con_coords_nombre.itertuples()
                     }
-                    etiqueta_nombre_elegida = st.selectbox(
-                        "Ver ese punto en el mapa y revisar si tiene algo cerca:",
-                        list(opciones_nombre.keys()),
-                        key="preview_resultado_nombre",
-                    )
-                    id_elegido = opciones_nombre[etiqueta_nombre_elegida]
-                    fila_elegida_nombre = con_coords_nombre[con_coords_nombre["id"] == id_elegido].iloc[0]
+                    if len(opciones_nombre) > 1:
+                        etiqueta_elegida = st.selectbox(
+                            "Hay varios con ese nombre — elige cuál ver en el mapa",
+                            list(opciones_nombre.keys()),
+                            key="preview_resultado_nombre_mapa_unico",
+                        )
+                    else:
+                        etiqueta_elegida = next(iter(opciones_nombre))
+                    id_punto_buscado = opciones_nombre[etiqueta_elegida]
+                    fila_elegida = con_coords_nombre[con_coords_nombre["id"] == id_punto_buscado].iloc[0]
                     consulta_punto = {
-                        "lat": fila_elegida_nombre["latitud"], "lon": fila_elegida_nombre["longitud"],
-                        "etiqueta": fila_elegida_nombre["local_identificado"],
+                        "lat": float(fila_elegida["latitud"]), "lon": float(fila_elegida["longitud"]),
+                        "etiqueta": str(fila_elegida["local_identificado"]),
+                        "info_extra": (
+                            f"Fuente: {fila_elegida.get('fuente', '') or '—'}"
+                            f"\nResponsable: {fila_elegida.get('especialista', '') or '—'}"
+                            f"\nEstado: {fila_elegida.get('estado', '') or '—'}"
+                            f"\nFecha de registro: {fila_elegida.get('fecha_registro', '') or '—'}"
+                            f"\nCiudad: {fila_elegida.get('ciudad', '') or '—'}"
+                        ),
                     }
 
     else:  # Por coordenada
-        coord_pegada = st.text_input(
-            "Pega la coordenada completa (latitud, longitud)",
-            key="coord_pegada_tab1",
+        col_texto, col_boton = st.columns([5, 1], vertical_alignment="bottom")
+        coord_pegada = col_texto.text_input(
+            "Coordenada completa (latitud, longitud)", key="coord_pegada_mapa_unico",
             placeholder="Ej. 4.697539545568918, -74.09220071349365",
         )
-        st.caption(
-            "Pégala completa, con todos los decimales que traiga (de Google "
-            "Maps o de ArcGIS) — así el punto no se desplaza."
-        )
-        if st.button("🔍 Buscar", type="primary", key="buscar_coord_btn"):
+        if col_boton.button("🔍 Buscar", type="primary", key="buscar_coord_mapa_unico", use_container_width=True):
             coord = parsear_coordenada_pegada(coord_pegada)
             if coord is None:
                 st.session_state["error_busqueda_punto"] = True
@@ -1051,202 +1172,125 @@ if modulo_activo.startswith("🔁"):
                 lat_e, lon_e = coord
                 st.session_state["resultado_busqueda_punto"] = {
                     "lat": lat_e, "lon": lon_e,
-                    "etiqueta": f"Coordenada {lat_e}, {lon_e}",
+                    "etiqueta": f"Coordenada {lat_e:.5f}, {lon_e:.5f}",
+                    "info_extra": f"Coordenada: {lat_e}, {lon_e}",
                 }
                 st.session_state["error_busqueda_punto"] = False
-
+        st.caption(
+            "Pégala completa, con todos los decimales (de Google Maps o "
+            "ArcGIS), para que el punto no se desplace."
+        )
         if st.session_state.get("error_busqueda_punto"):
             st.error(
                 "Eso no tiene forma de coordenada. Debe verse así: "
-                "'4.697539545568918, -74.09220071349365'."
+                "4.697539545568918, -74.09220071349365"
             )
         consulta_punto = st.session_state.get("resultado_busqueda_punto")
 
-    if consulta_punto is not None:
-        lat_c, lon_c = consulta_punto["lat"], consulta_punto["lon"]
-        cercanos = detectar_coincidencias(df, lat_c, lon_c, consulta_punto.get("etiqueta", ""))
-
-        st.divider()
-
-        st.write("📍 **Vista de calle del lugar consultado:**")
-        col_mapa, col_calle = st.columns(2)
-        with col_mapa:
-            st.caption("Mapa")
-            components.iframe(url_mapa_embed(lat_c, lon_c), height=340)
-        with col_calle:
-            st.caption("Street View (vista a nivel de calle)")
-            components.iframe(url_streetview_embed(lat_c, lon_c), height=340)
-        st.caption(
-            "Si el punto está en una zona sin cobertura de Street View, "
-            "Google muestra ahí mismo un aviso de que no hay imagen "
-            "disponible."
-        )
-
-        st.write("**Ese punto en el mapa general (queda en rojo):**")
-        renderizar_mapa_general(
-            df, fuentes_activas=list(FUENTE_COLOR_ICONO.keys()),
-            punto_resaltado=(lat_c, lon_c, consulta_punto["etiqueta"]),
-            key="mapa_revisar_punto",
-        )
-        st.markdown(tabla_leyenda_fuentes_html(incluir_resaltado=True), unsafe_allow_html=True)
-
-        if not cercanos.empty:
-            st.warning(
-                f"⚠️ Posible duplicidad — se encontraron {len(cercanos)} punto(s) "
-                f"cercano(s) (< {UMBRAL_DUPLICIDAD_M:.0f} m) o con nombre parecido.",
-                icon="⚠️",
-            )
-            for _, row in cercanos.iterrows():
-                detalle_distancia = (
-                    f"A {row['distancia_m']:.0f} m de tu ubicación"
-                    if row["distancia_m"] != float("inf")
-                    else "Sin coordenadas para comparar distancia"
-                )
-                registrado_por = f"Registrado por <b>{row['especialista'] or '—'}</b>"
-                if row.get("practicante"):
-                    registrado_por += f" · practicante <b>{row['practicante']}</b>"
-                filas_tarjeta = [
-                    ("🗂️", f"Fuente: {row['fuente']}"),
-                    ("👤", registrado_por),
-                    ("📅", f"Fecha de registro: {row['fecha_registro']}"),
-                    ("📍", f"{detalle_distancia} · {row['ciudad']}"),
-                ]
-                st.markdown(
-                    tarjeta_resultado_html(
-                        titulo=row["local_identificado"],
-                        badge_html=badge_estado_html(row.get("estado", "")),
-                        filas=filas_tarjeta,
-                        nota=f"Por qué se marca como posible duplicado: {row['coincide_por']}",
-                    ),
-                    unsafe_allow_html=True,
-                )
-        else:
-            st.success(
-                "✅ No se encontraron coincidencias cercanas registradas en "
-                "esa ubicación — puedes continuar con el registro.",
-                icon="✅",
-            )
-
-    st.divider()
-    st.markdown("#### 🗺️ Mapa general")
-    st.caption(
-        "Todos los puntos que llegan por las 4 fuentes del Módulo 1 "
-        "(especialistas, operación, terceros e inmobiliaria). Aquí NO se "
-        "muestran generadores — eso vive solo en el Módulo 2."
-    )
-
-    st.markdown("**🔍 Ubicar por nombre, dirección o coordenada**")
-    modo_busqueda_mapa = st.radio(
-        "Ubicar en el mapa por…",
-        ["Nombre (punto ya registrado)", "Dirección o coordenada"],
-        horizontal=True,
-        key="modo_busqueda_mapa_general",
-        label_visibility="collapsed",
-    )
-    punto_resaltado_mapa = None
-    if modo_busqueda_mapa.startswith("Nombre"):
-        nombre_mapa = st.text_input("Nombre a ubicar", key="nombre_ubicar_mapa", placeholder="Ej. Toberin 168")
-        if nombre_mapa:
-            encontrados_mapa = buscar_por_nombre(df, nombre_mapa)
-            con_coords_mapa = encontrados_mapa.dropna(subset=["latitud", "longitud"])
-            if con_coords_mapa.empty:
-                st.caption("No se encontró ese nombre (o no tiene coordenadas registradas).")
-            else:
-                fila_mapa = con_coords_mapa.iloc[0]
-                punto_resaltado_mapa = (fila_mapa["latitud"], fila_mapa["longitud"], fila_mapa["local_identificado"])
-    else:
-        texto_lugar = st.text_input(
-            "Dirección o coordenada", key="texto_ubicar_mapa",
-            placeholder="Ej. Carrera 15 # 93-60, Bogotá   ó   4.6975, -74.0922",
-        )
-        if st.button("Ubicar", key="btn_ubicar_mapa"):
-            with st.spinner("Buscando..."):
-                resultado_lugar = buscar_lugar(texto_lugar)
-            if resultado_lugar is None:
-                st.session_state["error_ubicar_mapa"] = True
-                st.session_state.pop("punto_ubicado_mapa", None)
-            else:
-                lat_u, lon_u, etq_u = resultado_lugar
-                st.session_state["punto_ubicado_mapa"] = {"lat": lat_u, "lon": lon_u, "etiqueta": etq_u}
-                st.session_state["error_ubicar_mapa"] = False
-        if st.session_state.get("error_ubicar_mapa"):
-            st.error(
-                "No se encontró esa dirección o coordenada. La búsqueda por "
-                "dirección usa un servicio gratuito de mapas (OpenStreetMap) "
-                "que a veces no tiene cobertura exacta en Colombia — si el "
-                "resultado no cae en el lugar correcto, prueba pegando la "
-                "coordenada exacta desde Google Maps."
-            )
-        p_ubicado = st.session_state.get("punto_ubicado_mapa")
-        if p_ubicado:
-            punto_resaltado_mapa = (p_ubicado["lat"], p_ubicado["lon"], p_ubicado["etiqueta"])
-
-    if punto_resaltado_mapa is not None:
-        col_mapa_u, col_calle_u = st.columns(2)
-        with col_mapa_u:
-            st.caption("Mapa")
-            components.iframe(url_mapa_embed(punto_resaltado_mapa[0], punto_resaltado_mapa[1]), height=280)
-        with col_calle_u:
-            st.caption("Street View")
-            components.iframe(url_streetview_embed(punto_resaltado_mapa[0], punto_resaltado_mapa[1]), height=280)
-
-    capas_generales = st.multiselect(
-        "Capas a mostrar",
+    capas_mapa = st.multiselect(
+        "Fuentes que se muestran en el mapa",
         list(FUENTE_COLOR_ICONO.keys()),
         default=list(FUENTE_COLOR_ICONO.keys()),
-        key="capas_mapa_general",
-    )
-    renderizar_mapa_general(
-        df, fuentes_activas=capas_generales,
-        punto_resaltado=punto_resaltado_mapa,
-        key="mapa_general_tab1",
-    )
-    st.markdown(
-        tabla_leyenda_fuentes_html(incluir_resaltado=bool(punto_resaltado_mapa)),
-        unsafe_allow_html=True,
+        key="capas_mapa_unico",
     )
 
-    st.markdown("**🔎 Ver info y Street View de un punto del mapa**")
-    st.caption(
-        "Elige un punto de la lista para ver toda su información y su "
-        "Street View — es la forma más confiable de 'pararte' en un punto "
-        "del mapa (el clic directo sobre el mapa no es confiable en todas "
-        "las versiones de Streamlit)."
+    resaltado_mapa = None
+    clave_mapa = "mapa_unico_modulo1_sin_busqueda"
+    if consulta_punto is not None:
+        lat_c, lon_c = consulta_punto["lat"], consulta_punto["lon"]
+        resaltado_mapa = (lat_c, lon_c, consulta_punto["etiqueta"], consulta_punto.get("info_extra", ""))
+        clave_mapa = f"mapa_unico_modulo1_{lat_c:.5f}_{lon_c:.5f}"
+
+    mostrar_leyenda_fuentes(incluir_resaltado=consulta_punto is not None)
+    renderizar_mapa_general(
+        df, fuentes_activas=capas_mapa, punto_resaltado=resaltado_mapa,
+        key=clave_mapa, altura=620,
     )
-    df_en_mapa = df[df["fuente"].isin(capas_generales)].dropna(subset=["latitud", "longitud"])
-    if df_en_mapa.empty:
-        st.caption("No hay puntos con coordenadas en las capas seleccionadas.")
+    st.caption(
+        "Pasa el mouse sobre un pin para ver toda su información. Si dos "
+        "o más puntos caen en el mismo lugar, se abren uno al lado del otro "
+        "para que ninguno quede tapado."
+    )
+
+    # Aviso: puntos que están uno encima del otro en el mismo lugar.
+    apilados = detectar_apilados(df, capas_mapa)
+    if not apilados.empty:
+        st.warning(
+            f"⚠️ Hay {len(apilados)} lugar(es) con más de un punto en el mismo "
+            "sitio (por ejemplo, uno de Operación encima de uno de Especialistas).",
+            icon="⚠️",
+        )
+        with st.expander("Ver cuáles son"):
+            st.dataframe(apilados, use_container_width=True, hide_index=True)
+
+    if consulta_punto is None:
+        st.info(
+            "Busca un punto arriba para ver aquí si hay otros puntos cerca "
+            "(posible duplicidad) o si está libre para análisis, junto con "
+            "su Google Maps y Street View."
+        )
     else:
-        opciones_info = {"— Ninguno —": None}
-        for row in df_en_mapa.itertuples():
-            opciones_info[f"{row.local_identificado} · {row.fuente}"] = row.id
-        elegido_info = st.selectbox("Elige un punto", list(opciones_info.keys()), key="selector_info_mapa_tab1")
-        if opciones_info[elegido_info] is not None:
-            fila_info = df_en_mapa[df_en_mapa["id"] == opciones_info[elegido_info]].iloc[0]
-            col_info_m1, col_calle_m1 = st.columns([1, 1])
-            with col_info_m1:
-                st.markdown(
-                    tarjeta_resultado_html(
-                        titulo=fila_info["local_identificado"],
-                        badge_html=badge_estado_html(fila_info.get("estado", "")),
-                        filas=[
-                            ("🗂️", f"Fuente: {fila_info['fuente']}"),
-                            ("👤", f"Responsable: {fila_info.get('especialista', '') or '—'}"),
-                            ("📅", f"Fecha de registro: {fila_info.get('fecha_registro', '') or '—'}"),
-                            ("📍", f"Coordenadas: {fila_info['latitud']:.6f}, {fila_info['longitud']:.6f}"),
-                        ],
-                    ),
-                    unsafe_allow_html=True,
+        lat_c, lon_c = consulta_punto["lat"], consulta_punto["lon"]
+        st.button("✖ Quitar la búsqueda", key="quitar_busqueda_mapa_unico", on_click=_limpiar_busqueda_mapa)
+
+        cercanos = detectar_coincidencias(df, lat_c, lon_c, consulta_punto.get("etiqueta", ""))
+        if id_punto_buscado is not None:
+            cercanos = cercanos[cercanos["id"] != id_punto_buscado]
+
+        st.markdown(f"##### Resultado para: {consulta_punto['etiqueta']}")
+        if cercanos.empty:
+            st.success(
+                f"✅ Este punto está **libre para análisis**: no hay ningún punto "
+                f"registrado a menos de {UMBRAL_DUPLICIDAD_M:.0f} m ni con un nombre parecido.",
+                icon="✅",
+            )
+        else:
+            st.warning(
+                f"⚠️ Posible duplicidad — hay {len(cercanos)} punto(s) cerca "
+                f"(a menos de {UMBRAL_DUPLICIDAD_M:.0f} m) o con nombre parecido.",
+                icon="⚠️",
+            )
+            en_el_mismo_lugar = cercanos[cercanos["distancia_m"] <= 15]
+            if not en_el_mismo_lugar.empty:
+                st.error(
+                    f"🔴 {len(en_el_mismo_lugar)} de ellos están prácticamente en el "
+                    "MISMO lugar (a 15 m o menos).",
+                    icon="🔴",
                 )
-            with col_calle_m1:
-                st.caption("Street View")
-                components.iframe(url_streetview_embed(fila_info["latitud"], fila_info["longitud"]), height=300)
+            tabla_cercanos = pd.DataFrame({
+                "Fuente": cercanos["fuente"].values,
+                "Nombre": cercanos["local_identificado"].values,
+                "Responsable": cercanos["especialista"].replace("", "—").values,
+                "Practicante": cercanos["practicante"].replace("", "—").values if "practicante" in cercanos.columns else "—",
+                "Estado": cercanos["estado"].replace("", "Pendiente").values,
+                "Fecha de registro": cercanos["fecha_registro"].replace("", "—").values,
+                "Ciudad": cercanos["ciudad"].replace("", "—").values,
+                "Distancia": [
+                    f"{d:.0f} m" if d != float("inf") else "Sin coordenadas"
+                    for d in cercanos["distancia_m"]
+                ],
+                "Por qué aparece": cercanos["coincide_por"].values,
+            })
+            st.dataframe(tabla_cercanos, use_container_width=True, hide_index=True)
+
+        st.markdown("##### Google Maps y Street View de ese punto")
+        col_mapa, col_calle = st.columns(2)
+        with col_mapa:
+            st.caption("Google Maps")
+            components.iframe(url_mapa_embed(lat_c, lon_c), height=380)
+        with col_calle:
+            st.caption("Street View (vista a nivel de calle)")
+            components.iframe(url_streetview_embed(lat_c, lon_c), height=380)
+        st.caption(
+            "Si el punto está en una zona sin cobertura de Street View, "
+            "Google muestra ahí mismo un aviso de que no hay imagen disponible."
+        )
 
     st.divider()
     st.markdown("#### 📋 Posibles duplicados")
     st.caption(
         "Compara cada punto contra los demás, sin importar de cuál de las "
-        "4 fuentes venga. Se marca como posible duplicado si: la "
+        "5 fuentes venga. Se marca como posible duplicado si: la "
         "coordenada es casi exacta (≤ 15 m, sin importar el nombre), o "
         "están cerca (≤ " + f"{UMBRAL_DUPLICIDAD_M:.0f}" + " m) Y el nombre se "
         "parece, o tienen exactamente el mismo nombre en cualquier "
@@ -1304,88 +1348,9 @@ if modulo_activo.startswith("🔁"):
                     ),
                 ],
                 key="mapa_duplicado_m1_seleccionado",
+                altura=480,
             )
 
-    st.divider()
-    st.markdown("#### 🏠 Inmobiliarias — evaluación de puntos")
-    st.caption(
-        "Primer borrador funcional del módulo de inmobiliarias — todavía "
-        "no llegan puntos reales en el Excel, así que por ahora se prueba "
-        "subiendo o diligenciando la información a mano. Apenas llegue un "
-        "punto real, se ajusta la evaluación con Alisson."
-    )
-
-    with st.expander("📎 Adjuntar archivo o foto de referencia (opcional)"):
-        archivo_inmo = st.file_uploader(
-            "Excel/imagen con la info del punto (foto de fachada, ficha, etc.)",
-            type=["xlsx", "csv", "png", "jpg", "jpeg"], key="archivo_inmobiliaria",
-        )
-        if archivo_inmo is not None:
-            st.success(f"Archivo '{archivo_inmo.name}' recibido — puedes usarlo como referencia al llenar el formulario de abajo.")
-            if archivo_inmo.type and archivo_inmo.type.startswith("image"):
-                st.image(archivo_inmo, caption="Foto de fachada", width=320)
-
-    with st.form("form_inmobiliaria"):
-        col_nombre_inmo, col_ciudad_inmo = st.columns(2)
-        nombre_inmo = col_nombre_inmo.text_input("Nombre del punto")
-        ciudad_inmo = col_ciudad_inmo.text_input("Ciudad")
-        direccion_inmo = st.text_input("Dirección")
-        foto_inmo = st.file_uploader("Foto de fachada (opcional)", type=["png", "jpg", "jpeg"], key="foto_fachada_inmo")
-
-        st.markdown("**Variables de evaluación**")
-        respuestas_inmo = {}
-        cols_criterios = st.columns(2)
-        for i, criterio in enumerate(CRITERIOS_INMOBILIARIA):
-            with cols_criterios[i % 2]:
-                respuestas_inmo[criterio["clave"]] = st.selectbox(
-                    criterio["etiqueta"], list(criterio["opciones"].keys()),
-                    key=f"inmo_{criterio['clave']}",
-                )
-
-        razones_manual_descarte = st.multiselect(
-            "Razones de descarte adicionales (elige si aplica)",
-            RAZONES_DESCARTE_INMOBILIARIA, key="inmo_razones_descarte_manual",
-        )
-        notas_inmo = st.text_area("Notas / comentarios adicionales", key="inmo_notas")
-        enviado_inmo = st.form_submit_button("📊 Generar informe de evaluación", type="primary")
-
-    if enviado_inmo:
-        resultado_inmo = evaluar_punto_inmobiliario(respuestas_inmo)
-        st.session_state["resultado_evaluacion_inmo"] = {
-            "nombre": nombre_inmo, "direccion": direccion_inmo, "ciudad": ciudad_inmo,
-            "resultado": resultado_inmo,
-            "razones_manual_descarte": razones_manual_descarte,
-            "notas": notas_inmo,
-            "foto": foto_inmo.getvalue() if foto_inmo is not None else None,
-        }
-
-    informe_inmo = st.session_state.get("resultado_evaluacion_inmo")
-    if informe_inmo:
-        r = informe_inmo["resultado"]
-        color_nivel = {"Alto": "badge-aprobado", "Medio": "badge-pendiente", "Bajo": "badge-descartado"}[r["nivel"]]
-        razones_en_contra_todas = r["razones_en_contra"] + informe_inmo["razones_manual_descarte"]
-        st.markdown(
-            '<div class="tarjeta-resultado"><div class="tarjeta-header">'
-            f'<span class="titulo">{informe_inmo["nombre"] or "(sin nombre)"}</span>'
-            f'<span class="badge-estado {color_nivel}">Nivel {r["nivel"]} · {r["porcentaje"]:.0f}%</span>'
-            '</div>'
-            f'<div class="fila">📍 {informe_inmo["direccion"] or "—"}, {informe_inmo["ciudad"] or "—"}</div>'
-            f'<div class="fila">✅ Razones a favor: {", ".join(r["razones_a_favor"]) or "—"}</div>'
-            f'<div class="fila">⚠️ Razones en contra: {", ".join(razones_en_contra_todas) or "—"}</div>'
-            + (f'<div class="fila nota">📝 {informe_inmo["notas"]}</div>' if informe_inmo["notas"] else "")
-            + '</div>',
-            unsafe_allow_html=True,
-        )
-        if informe_inmo["foto"]:
-            st.image(informe_inmo["foto"], caption="Foto de fachada", width=360)
-        st.markdown("**Detalle de la evaluación:**")
-        st.dataframe(
-            pd.DataFrame(r["detalle"]).rename(columns={
-                "criterio": "Criterio", "respuesta": "Respuesta", "puntos": "Puntos", "maximo": "Máximo",
-            }),
-            use_container_width=True, hide_index=True,
-        )
-        st.caption(f"Puntaje total: {r['puntaje_total']} de {r['puntaje_maximo']} ({r['porcentaje']:.1f}%).")
 
 # ---------------------------------------------------------------------------
 # MÓDULO 2 · Generadores
