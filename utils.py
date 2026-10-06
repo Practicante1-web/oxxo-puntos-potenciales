@@ -1220,15 +1220,35 @@ def _a_numero_coordenada(serie: pd.Series) -> pd.Series:
 
 
 def _buscar_encabezado_tiendas(crudo: pd.DataFrame, max_filas: int = 30) -> int:
-    """Fila (0, 1, 2…) donde parecen estar los títulos de las columnas."""
-    claves = ("latitud", "longitud", "lat", "lon", "estado", "estatus", "status", "tienda",
-              "nombre", "crm", "ciudad", "direccion", "coordenada", "apertura", "ubicacion",
-              "fecha ape", "dias op", "trafico", "ticket", "ventas")
-    exactas = ("x", "y", "et", "dia")
+    """Fila (0, 1, 2…) donde parecen estar los títulos de las columnas.
+
+    Un título es texto corto que COINCIDE con una palabra clave (por palabra
+    completa o por su comienzo), nunca por pedazos dentro de otra palabra
+    (así 'ALONSO' no cuenta como 'lon'). Las filas con muchos números
+    (filas de datos) no pueden ser el encabezado."""
+    import re as _re
+    exactas = {"x", "y", "et", "dia", "lat", "lon", "lng", "crm", "dias"}
+    prefijos = ("latitud", "longitud", "estado", "estatus", "status", "tienda", "nombre",
+                "ciudad", "direccion", "coordenada", "apertura", "ubicacion", "trafico",
+                "ticket", "ventas", "fecha", "region", "regional", "departamento", "municipio",
+                "formato", "segmento", "zona", "cluster")
     mejor, mejor_fila = 0, 0
     for i in range(min(max_filas, len(crudo))):
         celdas = [normalizar_texto(x) for x in crudo.iloc[i].tolist()]
-        puntaje = sum(1 for c in celdas if c and (c in exactas or any(k == c or k in c for k in claves)))
+        no_vacias = [c for c in celdas if c and c not in ("nan", "none", "nat")]
+        if not no_vacias:
+            continue
+        numericas = sum(1 for c in no_vacias if _re.fullmatch(r"[\d\s.,:/\-+]+", c))
+        if numericas / len(no_vacias) > 0.3:
+            continue
+        puntaje = 0
+        for c in no_vacias:
+            if len(c) > 40:
+                continue
+            tokens = _re.split(r"[^a-z0-9]+", c)
+            tokens = [t for t in tokens if t]
+            if c in exactas or any(t in exactas or t.startswith(prefijos) for t in tokens):
+                puntaje += 1
         if puntaje > mejor:
             mejor, mejor_fila = puntaje, i
     return mejor_fila
@@ -1250,16 +1270,21 @@ def parsear_tiendas(crudo: pd.DataFrame) -> pd.DataFrame:
 
     fila_enc = _buscar_encabezado_tiendas(crudo)
     tabla = crudo.iloc[fila_enc + 1:].copy()
-    tabla.columns = [str(c).strip() if str(c).strip() not in ("", "nan") else f"col_{i}"
-                     for i, c in enumerate(crudo.iloc[fila_enc].tolist())]
+    nombres, vistos = [], {}
+    for i, c in enumerate(crudo.iloc[fila_enc].tolist()):
+        n = str(c).strip() if str(c).strip() not in ("", "nan", "None") else f"col_{i}"
+        vistos[n] = vistos.get(n, 0) + 1
+        nombres.append(n if vistos[n] == 1 else f"{n} ({vistos[n]})")   # títulos repetidos
+    tabla.columns = nombres
     tabla = tabla.dropna(how="all")
     normal = {c: normalizar_texto(c) for c in tabla.columns}
     diag = {"columnas": list(tabla.columns), "fila_encabezado": int(fila_enc) + 1}
 
     def primera(*claves_exactas, contiene=()):
-        for c, n in normal.items():
-            if n in claves_exactas:
-                return c
+        for k in claves_exactas:          # respeta el orden de prioridad de las claves
+            for c, n in normal.items():
+                if n == k:
+                    return c
         for c, n in normal.items():
             if any(k in n for k in contiene):
                 return c
@@ -1351,7 +1376,7 @@ def parsear_tiendas(crudo: pd.DataFrame) -> pd.DataFrame:
     nombre = nombre.where(nombre != "", crm)
     detalle = crm.where(crm == "", "CRM: " + crm)
     if col_apertura is not None:
-        fechas = pd.to_datetime(tabla[col_apertura], errors="coerce", dayfirst=True)
+        fechas = pd.to_datetime(tabla[col_apertura], errors="coerce", dayfirst=not tabla[col_apertura].astype(str).str.match(r"^\s*\d{4}-").any())
         txt_fecha = fechas.dt.strftime("%d/%m/%Y").fillna("")
         detalle = (detalle + " · Apertura: " + txt_fecha).where(txt_fecha != "", detalle)
     nombre = nombre.where(nombre != "", "Tienda OXXO")
