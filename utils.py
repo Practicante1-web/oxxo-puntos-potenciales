@@ -1205,8 +1205,8 @@ def estado_tienda_desde_texto(valor) -> str:
     t = normalizar_texto(valor)
     if not t or t == "nan":
         return ""
-    if "firm" in t:
-        return "Firmada"
+    if "firm" in t or t == "obra" or t.startswith("en obra"):
+        return "Firmada"          # firmada o ya en obra (todavía no abre)
     if any(x in t for x in ("cerr", "inactiv", "clausur", "liquid", "baja")):
         return "Cerrada"
     if any(x in t for x in ("abiert", "operand", "operacion", "madur", "expansi", "activ", "funcion")):
@@ -1263,7 +1263,7 @@ def parsear_tiendas(crudo: pd.DataFrame) -> pd.DataFrame:
     `.attrs` (columnas encontradas, estados no reconocidos, etc.) para
     mostrarla en la app si algo no calza.
     """
-    salida_vacia = pd.DataFrame(columns=["nombre", "estado_tienda", "ciudad", "direccion", "detalle", "latitud", "longitud"])
+    salida_vacia = pd.DataFrame(columns=["nombre", "estado_tienda", "cr", "apertura", "ciudad", "direccion", "detalle", "latitud", "longitud"])
     if crudo is None or crudo.empty:
         salida_vacia.attrs["diagnostico"] = {"error": "La hoja de tiendas está vacía."}
         return salida_vacia
@@ -1359,9 +1359,9 @@ def parsear_tiendas(crudo: pd.DataFrame) -> pd.DataFrame:
         no_rec = no_rec[(no_rec != "") & (no_rec.str.lower() != "nan")]
         diag["estados_no_reconocidos"] = no_rec.value_counts().head(15).to_dict()
 
-    col_nombre = primera("nombre tienda", "nombre de la tienda", "tienda", "nombre", "nombre pdv",
+    col_nombre = primera("name", "nombre tienda", "nombre de la tienda", "tienda", "nombre", "nombre pdv",
                          "pdv", "sitio", "local", contiene=("nombre", "tienda"))
-    col_ciudad = primera("ciudad", "municipio", "plaza", "region", contiene=("ciudad", "municipio"))
+    col_ciudad = primera("ciudad", "municipio", "mun", "plaza", contiene=("ciudad", "municipio"))
     col_dir = primera("direccion", "direccion tienda", contiene=("direccion",))
     col_crm = primera("crm", "id", "codigo", "cod", "codigo tienda", "cr", contiene=("crm",))
     col_apertura = primera("fecha ape", "fecha apertura", "apertura", "fecha de apertura", contiene=("fecha ape", "apertura"))
@@ -1374,16 +1374,89 @@ def parsear_tiendas(crudo: pd.DataFrame) -> pd.DataFrame:
     nombre = txt(col_nombre)
     crm = txt(col_crm)
     nombre = nombre.where(nombre != "", crm)
-    detalle = crm.where(crm == "", "CRM: " + crm)
+    nombre = nombre.where(nombre != "", "Tienda OXXO")
+
+    txt_fecha = pd.Series([""] * len(tabla), index=tabla.index)
     if col_apertura is not None:
         fechas = pd.to_datetime(tabla[col_apertura], errors="coerce", dayfirst=not tabla[col_apertura].astype(str).str.match(r"^\s*\d{4}-").any())
         txt_fecha = fechas.dt.strftime("%d/%m/%Y").fillna("")
-        detalle = (detalle + " · Apertura: " + txt_fecha).where(txt_fecha != "", detalle)
-    nombre = nombre.where(nombre != "", "Tienda OXXO")
+
+    def col(*nombres):
+        for k in nombres:
+            for c, n in normal.items():
+                if n == k:
+                    return c
+        return None
+
+    def num(c):
+        if c is None:
+            return pd.Series([None] * len(tabla), index=tabla.index)
+        return pd.to_numeric(tabla[c].astype(str).str.strip().str.replace(",", ".", regex=False), errors="coerce")
+
+    def fmt(v, dec=0, pref=""):
+        if v is None or pd.isna(v):
+            return ""
+        t = f"{v:,.{dec}f}".replace(",", "§").replace(".", ",").replace("§", ".")
+        return pref + t
+
+    c_estado_orig = diag.get("columna_estado")
+    c_zona, c_depto, c_upz = col("zona"), col("departamento", "depto"), col("upz/comuna", "upz", "comuna")
+    c_estrato, c_arr, c_tipo = col("estrato"), col("arrendador"), col("tipo de local", "tipo local")
+    c_area, c_gen, c_seg, c_tie = col("area"), col("generador"), col("seg26", "segmento"), col("tie26")
+    c_mes = col("mesop", "meses op", "meses operando")
+    c_vta, c_vta6 = col("ventas oum", "ventas um"), col("vu6m")
+    c_tra, c_tra6 = col("trafico um"), col("tru6")
+    c_tic, c_tic6 = col("ticket um"), col("ticket u6m")
+    c_sc, c_scf = col("score"), col("scoref")
+    n_area, n_mes, n_vta, n_vta6 = num(c_area), num(c_mes), num(c_vta), num(c_vta6)
+    n_tra, n_tra6, n_tic, n_tic6 = num(c_tra), num(c_tra6), num(c_tic), num(c_tic6)
+    n_sc, n_scf, n_estr = num(c_sc), num(c_scf), num(c_estrato)
+
+    def t_(c, i):
+        return "" if c is None else str(tabla.at[i, c]).strip().replace("nan", "")
+
+    fichas, aperturas = [], []
+    for i in tabla.index:
+        L = []
+        if crm[i]:
+            L.append(f"CR: {crm[i]}")
+        est_o = t_(c_estado_orig, i)
+        if est_o:
+            L.append(f"Estado en la hoja: {est_o}")
+        if txt_fecha[i]:
+            m = n_mes[i]
+            L.append(f"Fecha de apertura: {txt_fecha[i]}" + (f" · {fmt(m)} meses operando" if pd.notna(m) and m > 0 else ""))
+        ub = ", ".join(x for x in (t_(col("mun"), i), t_(c_depto, i)) if x)
+        if ub:
+            L.append("Ubicación: " + ub + (f" · Zona {t_(c_zona, i)}" if t_(c_zona, i) else ""))
+        bar = t_(c_upz, i)
+        if bar or pd.notna(n_estr[i]):
+            L.append("UPZ/Comuna: " + (bar or "—") + (f" · Estrato {fmt(n_estr[i])}" if pd.notna(n_estr[i]) else ""))
+        tp = t_(c_tipo, i)
+        if tp or (pd.notna(n_area[i]) and n_area[i] > 0):
+            L.append("Tipo de local: " + (tp or "—") + (f" · Área: {fmt(n_area[i], 1)} m²" if pd.notna(n_area[i]) and n_area[i] > 0 else ""))
+        for etq, c in (("Generador", c_gen), ("Segmento", c_seg), ("Tipo de tienda", c_tie)):
+            v = t_(c, i)
+            if v and v != "0":
+                L.append(f"{etq}: {v}")
+        if pd.notna(n_vta[i]) and n_vta[i] != 0:
+            L.append(f"Ventas último mes: {fmt(n_vta[i])}" + (f" · prom. 6 meses: {fmt(n_vta6[i])}" if pd.notna(n_vta6[i]) else ""))
+        if pd.notna(n_tra[i]) and n_tra[i] != 0:
+            L.append(f"Tráfico último mes: {fmt(n_tra[i])}" + (f" · prom. 6 meses: {fmt(n_tra6[i])}" if pd.notna(n_tra6[i]) else ""))
+        if pd.notna(n_tic[i]) and n_tic[i] != 0:
+            L.append(f"Ticket último mes: {fmt(n_tic[i])}" + (f" · prom. 6 meses: {fmt(n_tic6[i])}" if pd.notna(n_tic6[i]) else ""))
+        if pd.notna(n_scf[i]) or pd.notna(n_sc[i]):
+            L.append("Score: " + fmt(n_scf[i] if pd.notna(n_scf[i]) else n_sc[i], 1))
+        ar = t_(c_arr, i)
+        if ar and ar != "0":
+            L.append(f"Arrendador: {ar}")
+        fichas.append("\n".join(L))
+        aperturas.append(txt_fecha[i])
 
     resultado = pd.DataFrame({
-        "nombre": nombre, "estado_tienda": estado, "ciudad": txt(col_ciudad).apply(normalizar_ciudad),
-        "direccion": txt(col_dir), "detalle": detalle, "latitud": lat, "longitud": lon,
+        "nombre": nombre, "estado_tienda": estado, "cr": crm, "apertura": aperturas,
+        "ciudad": txt(col_ciudad).apply(normalizar_ciudad),
+        "direccion": txt(col_dir), "detalle": fichas, "latitud": lat, "longitud": lon,
     })
     total = len(resultado)
     en_colombia = resultado["latitud"].between(_LAT_MIN, _LAT_MAX) & resultado["longitud"].between(_LON_MIN, _LON_MAX)

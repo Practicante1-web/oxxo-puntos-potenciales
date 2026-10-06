@@ -1220,9 +1220,10 @@ if modulo_activo.startswith("🔁"):
                 st.dataframe(
                     pd.DataFrame({
                         "Estado": tiendas_cerca["estado_tienda"].values,
+                        "CR": (tiendas_cerca["cr"] if "cr" in tiendas_cerca else tiendas_cerca["nombre"]).replace("", "—").values,
                         "Tienda": tiendas_cerca["nombre"].replace("", "—").values,
+                        "Apertura": (tiendas_cerca["apertura"] if "apertura" in tiendas_cerca else tiendas_cerca["nombre"].map(lambda _: "")).replace("", "—").values,
                         "Ciudad": tiendas_cerca["ciudad"].replace("", "—").values,
-                        "Dirección": tiendas_cerca["direccion"].replace("", "—").values,
                         "Distancia": [f"{d:.0f} m" for d in tiendas_cerca["distancia_m"]],
                     }),
                     use_container_width=True, hide_index=True,

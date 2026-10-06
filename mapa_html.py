@@ -130,13 +130,18 @@ def construir_html_mapa(
             estado = str(row.get("estado_tienda", "") or "")
             if estado not in _CLAVE_ESTADO_TIENDA:
                 continue
+            ficha = [x for x in str(row.get("detalle", "") or "").split("\n") if x.strip() and x.strip().lower() != "nan"]
             lineas = [f"Estado de la tienda: {estado}"]
-            for etiqueta, col in (
-                ("Ciudad", "ciudad"), ("Dirección", "direccion"), ("Detalle", "detalle"),
-            ):
-                val = str(row.get(col, "") or "").strip()
-                if val and val.lower() != "nan":
-                    lineas.append(f"{etiqueta}: {val}")
+            if ficha:
+                # la ficha ya trae CR, estado original, fecha de apertura, ubicación, ventas…
+                lineas = ficha if any(x.startswith("Estado en la hoja") for x in ficha) else lineas + ficha
+            else:
+                for etiqueta, col in (("Ciudad", "ciudad"), ("Dirección", "direccion")):
+                    val = str(row.get(col, "") or "").strip()
+                    if val and val.lower() != "nan":
+                        lineas.append(f"{etiqueta}: {val}")
+            if str(row.get("direccion", "") or "").strip() not in ("", "nan"):
+                lineas.append(f"Dirección: {row.get('direccion')}")
             tds.append({
                 "a": round(float(row["latitud"]), 7),
                 "o": round(float(row["longitud"]), 7),
@@ -205,6 +210,7 @@ _PLANTILLA = r"""<!DOCTYPE html>
   #mapwrap { position:relative; flex:1; min-height:200px; border:1px solid #D9D9DE; border-radius:12px; overflow:hidden; background:#E6E3DD; }
   #map { position:absolute; inset:0; cursor:grab; touch-action:none; overflow:hidden; }
   #map.drag { cursor:grabbing; }
+  #vec { position:absolute; left:0; top:0; width:100%; height:100%; z-index:0; pointer-events:none; display:none; }
   #tiles, #marks { position:absolute; left:0; top:0; width:100%; height:100%; }
   #tiles { z-index:0; overflow:hidden; }
   #tiles img.suave { filter: grayscale(1) contrast(.72) brightness(1.2); }
@@ -232,7 +238,7 @@ _PLANTILLA = r"""<!DOCTYPE html>
 <div id="app">
   <div id="bar"></div>
   <div id="mapwrap">
-    <div id="map"><div id="tiles"></div><div id="marks"></div></div>
+    <div id="map"><div id="vec"></div><div id="tiles"></div><div id="marks"></div></div>
     <div id="zoom"><button id="zin" title="Acercar">+</button><button id="zout" title="Alejar">&minus;</button></div>
     <div id="estado"></div>
     <div id="attr"></div>
@@ -355,6 +361,7 @@ function setMode(m){
   S.mode=m; S.big=false; S.sem=(m==='detalle'); S.tm=(m==='detalle');
   segBtns.simple.classList.toggle('on', m==='simple'); segBtns.detalle.classList.toggle('on', m==='detalle');
   chipSem.classList.toggle('oculto', m==='simple'); chipTm.classList.toggle('oculto', m==='simple');
+  chipBig.classList.toggle('oculto', m==='simple');
   chipSem.classList.toggle('off', !S.sem); chipTm.classList.toggle('off', !S.tm); chipBig.classList.toggle('off', !S.big);
   setEstado(''); refresh(); fetchExtra();
 }
@@ -458,7 +465,45 @@ function tileUrl(b,z,x,y){
   if(bm.sub) u=u.replace('{s}',bm.sub[(x+y)%bm.sub.length]);
   return u;
 }
+/* ---------- fondo vectorial claro (el mismo estilo claro de CARTO de antes) ---------- */
+var VEC = { map:null, ready:false, cargando:false, visible:false };
+var VEC_ESTILO = 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json';
+function crearVec(){
+  if(VEC.map || !window.maplibregl) return;
+  try{
+    VEC.map = new maplibregl.Map({ container:'vec', style:VEC_ESTILO, center:[view.lon,view.lat], zoom:view.z-1,
+      interactive:false, attributionControl:false, fadeDuration:0, pixelRatio:Math.max(window.devicePixelRatio||1,1) });
+    var listo=function(){ if(!VEC.ready){ VEC.ready=true; refresh(); } };
+    VEC.map.on('load', listo);
+    VEC.map.on('idle', listo);
+  }catch(e){ VEC.map=null; }
+}
+function cargarVec(){
+  if(VEC.cargando || VEC.map) return; VEC.cargando=true;
+  var css=document.createElement('link'); css.rel='stylesheet';
+  css.href='https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css'; document.head.appendChild(css);
+  function intenta(urls){
+    if(!urls.length) return;
+    var sc=document.createElement('script'); sc.src=urls[0];
+    sc.onload=crearVec; sc.onerror=function(){ intenta(urls.slice(1)); };
+    document.head.appendChild(sc);
+  }
+  intenta(['https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js','https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js']);
+}
+function syncVec(){
+  var quiere = (S.mode==='simple');
+  var el=$('vec');
+  if(quiere && !VEC.visible){ el.style.display='block'; VEC.visible=true; if(VEC.map) VEC.map.resize(); }
+  if(!quiere && VEC.visible){ el.style.display='none'; VEC.visible=false; }
+  if(quiere && VEC.map){
+    if(VEC.w!==W || VEC.h!==H){ VEC.w=W; VEC.h=H; VEC.map.resize(); }
+    VEC.map.jumpTo({ center:[view.lon, view.lat], zoom:clamp(view.z-1,0,22) });
+  }
+}
+function vecActivo(){ return S.mode==='simple' && VEC.ready; }
+
 function capasBase(){
+  if(vecActivo()) return [];
   /* Mapa simple: gris claro de Esri (como el mapa claro de antes) hasta el zoom 16;
      más cerca se usa OpenStreetMap en gris suave. Mapa detallado: OpenStreetMap a color. */
   if(S.mode==='simple'){
@@ -491,7 +536,8 @@ function renderTiles(cx,cy){
       }
     }
   });
-  $('attr').textContent = S.mode==='simple' ? (view.z<=16.5 ? BASES.gris.attr : '© OpenStreetMap') : BASES.osm.attr;
+  $('attr').textContent = S.mode==='simple' ? (VEC.ready ? '© CARTO, © OpenStreetMap' : (view.z<=16.5 ? BASES.gris.attr : '© OpenStreetMap')) : BASES.osm.attr;
+  syncVec();
   Object.keys(tileCache).forEach(function(key){
     var t=tileCache[key];
     var s2=Math.pow(2,view.z-t.tz), size=256*s2;
@@ -607,6 +653,7 @@ function fit(list){
 if(D.centro){ view.lat=D.centro[0]; view.lon=D.centro[1]; view.z=D.centro[2]; }
 else { var rr=marks.filter(function(m){return m.kind==='r';}); if(rr.length) fit(rr); }
 setMode('simple');
+cargarVec();
 render(); setTimeout(function(){ render(); fetchExtra(); },60);
 })();
 </script></body></html>
