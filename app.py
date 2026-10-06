@@ -14,7 +14,6 @@ vivo a un link de OneDrive (igual mecanismo que el Excel de puente que ya
 se usaba antes, ahora aplicado al archivo de varias hojas).
 """
 
-import html as _html
 import json
 from datetime import datetime
 from pathlib import Path
@@ -164,36 +163,31 @@ def _resaltados_a_lista(punto_resaltado):
     return list(punto_resaltado)
 
 
-def _esc(valor) -> str:
-    """Escapa texto para meterlo en el HTML del tooltip (nombres con < > & no rompen nada)."""
-    return _html.escape(str(valor))
-
-
 def _texto_tooltip_resaltado(item) -> str:
-    """Arma el tooltip (HTML, al pasar el mouse) para un punto resaltado, incluyendo la info extra si se dio."""
-    partes = [f"<b>🔎 {_esc(item[2])}</b>"]
+    """Arma el tooltip (texto, al pasar el mouse) para un punto resaltado, incluyendo la info extra si se dio."""
+    texto = f"🔎 {item[2]}"
     if len(item) > 3 and item[3]:
-        partes += [_esc(linea) for linea in str(item[3]).split("\n") if linea.strip()]
-    return "<br>".join(partes)
+        texto = texto + "\n" + str(item[3])
+    return texto
 
 
 def _celda_tooltip(d: pd.DataFrame, columna: str) -> pd.Series:
-    """Columna de texto lista para el tooltip: vacíos como '—' y todo escapado."""
+    """Columna de texto lista para el tooltip: vacíos como '—'."""
     if columna not in d.columns:
         return pd.Series(["—"] * len(d), index=d.index)
-    return d[columna].fillna("").astype(str).str.strip().replace("", "—").map(_esc)
+    return d[columna].fillna("").astype(str).str.strip().replace("", "—")
 
 
 def _columna_tooltip_fuente(d: pd.DataFrame) -> pd.Series:
-    """Tooltip HTML con toda la info del punto: nombre, fuente, responsable, estado, fecha, ciudad y coordenada."""
-    texto = "<b>📍 " + _celda_tooltip(d, "local_identificado") + "</b>"
-    texto = texto + "<br>Fuente: <b>" + _celda_tooltip(d, "fuente") + "</b>"
-    texto = texto + "<br>Responsable: " + _celda_tooltip(d, "especialista")
+    """Tooltip con toda la info del punto: nombre, fuente, responsable, estado, fecha y ciudad."""
+    texto = "📍 " + _celda_tooltip(d, "local_identificado")
+    texto = texto + "\nFuente: " + _celda_tooltip(d, "fuente")
+    texto = texto + "\nResponsable: " + _celda_tooltip(d, "especialista")
     if "practicante" in d.columns:
-        texto = texto + "<br>Practicante: " + _celda_tooltip(d, "practicante")
-    texto = texto + "<br>Estado: " + _celda_tooltip(d, "estado")
-    texto = texto + "<br>Fecha de registro: " + _celda_tooltip(d, "fecha_registro")
-    texto = texto + "<br>Ciudad: " + _celda_tooltip(d, "ciudad")
+        texto = texto + "\nPracticante: " + _celda_tooltip(d, "practicante")
+    texto = texto + "\nEstado: " + _celda_tooltip(d, "estado")
+    texto = texto + "\nFecha de registro: " + _celda_tooltip(d, "fecha_registro")
+    texto = texto + "\nCiudad: " + _celda_tooltip(d, "ciudad")
     return texto
 
 
@@ -243,7 +237,7 @@ ESTILO_TOOLTIP_MAPA = {
     "border": "1px solid #D0D0D5",
     "boxShadow": "0 4px 16px rgba(0,0,0,0.18)",
     "maxWidth": "340px",
-    "whiteSpace": "normal",
+    "whiteSpace": "pre-line",
     "zIndex": "9999",
 }
 
@@ -278,6 +272,7 @@ def _desplazamientos_apilados(base: pd.DataFrame, resaltados):
 
 
 COLUMNAS_APILADOS = ["Cuántos", "Fuentes", "Puntos en ese lugar", "Coordenada"]
+_COLUMNAS_APILADOS_TODAS = COLUMNAS_APILADOS + ["_ids", "_lat", "_lon"]
 
 
 def detectar_apilados(df, fuentes_activas) -> pd.DataFrame:
@@ -287,10 +282,10 @@ def detectar_apilados(df, fuentes_activas) -> pd.DataFrame:
     punto de Operación quedó encima de uno de Especialistas.
     """
     if df is None or df.empty:
-        return pd.DataFrame(columns=COLUMNAS_APILADOS)
+        return pd.DataFrame(columns=_COLUMNAS_APILADOS_TODAS)
     base = df[df["fuente"].isin(fuentes_activas)].dropna(subset=["latitud", "longitud"]).copy()
     if base.empty:
-        return pd.DataFrame(columns=COLUMNAS_APILADOS)
+        return pd.DataFrame(columns=_COLUMNAS_APILADOS_TODAS)
     base["_celda"] = [_clave_celda(a, b) for a, b in zip(base["latitud"], base["longitud"])]
     filas = []
     for _, g in base.groupby("_celda"):
@@ -303,13 +298,16 @@ def detectar_apilados(df, fuentes_activas) -> pd.DataFrame:
                 f"{n} ({f})" for n, f in zip(g["local_identificado"].astype(str), g["fuente"].astype(str))
             ),
             "Coordenada": f"{g['latitud'].mean():.6f}, {g['longitud'].mean():.6f}",
+            "_ids": list(g["id"]),
+            "_lat": float(g["latitud"].mean()),
+            "_lon": float(g["longitud"].mean()),
         })
     if not filas:
-        return pd.DataFrame(columns=COLUMNAS_APILADOS)
+        return pd.DataFrame(columns=_COLUMNAS_APILADOS_TODAS)
     return pd.DataFrame(filas).sort_values("Cuántos", ascending=False).reset_index(drop=True)
 
 
-def renderizar_mapa_general(df, fuentes_activas, punto_resaltado=None, key="mapa_general", altura=620):
+def renderizar_mapa_general(df, fuentes_activas, punto_resaltado=None, key="mapa_general", altura=620, centro=None, solo_ids=None):
     """
     Dibuja el mapa combinado del Módulo 1: una capa por cada fuente activa
     (Especialistas=morado, Operación=azul, Terceros=rosado,
@@ -326,7 +324,10 @@ def renderizar_mapa_general(df, fuentes_activas, punto_resaltado=None, key="mapa
 
     base = pd.DataFrame(columns=["latitud", "longitud", "fuente"])
     if df is not None and not df.empty:
-        base = df[df["fuente"].isin(fuentes_activas)].dropna(subset=["latitud", "longitud"]).reset_index(drop=True)
+        base = df[df["fuente"].isin(fuentes_activas)].dropna(subset=["latitud", "longitud"])
+        if solo_ids is not None:
+            base = base[base["id"].isin(solo_ids)]
+        base = base.reset_index(drop=True)
 
     off_base, off_res = _desplazamientos_apilados(base, resaltados)
 
@@ -334,12 +335,12 @@ def renderizar_mapa_general(df, fuentes_activas, punto_resaltado=None, key="mapa
         d = base[base["fuente"] == fuente].copy()
         if d.empty:
             continue
-        d["tooltip_html"] = _columna_tooltip_fuente(d)
+        d["tooltip_text"] = _columna_tooltip_fuente(d)
         capas.append(_capa_pines(d, color, desplazamientos=[off_base[i] for i in d.index]))
 
     if resaltados:
         d = pd.DataFrame(
-            [{"latitud": item[0], "longitud": item[1], "tooltip_html": _texto_tooltip_resaltado(item)} for item in resaltados]
+            [{"latitud": item[0], "longitud": item[1], "tooltip_text": _texto_tooltip_resaltado(item)} for item in resaltados]
         )
         desp_res = [off_res[i] for i in range(len(resaltados))]
         capas.append(_capa_pines(d, "rojo", size=TAMANO_PIN_RESALTADO_PX, desplazamientos=desp_res))
@@ -354,6 +355,8 @@ def renderizar_mapa_general(df, fuentes_activas, punto_resaltado=None, key="mapa
                 longitude=sum(r[1] for r in resaltados) / len(resaltados),
                 zoom=14,
             )
+    elif centro is not None:
+        vista = pdk.ViewState(latitude=centro[0], longitude=centro[1], zoom=centro[2])
     else:
         vista = pdk.ViewState(latitude=BOGOTA_LAT, longitude=BOGOTA_LON, zoom=ZOOM_BOGOTA_DEFAULT)
 
@@ -365,7 +368,7 @@ def renderizar_mapa_general(df, fuentes_activas, punto_resaltado=None, key="mapa
         pdk.Deck(
             layers=capas,
             initial_view_state=vista,
-            tooltip={"html": "{tooltip_html}", "style": ESTILO_TOOLTIP_MAPA},
+            tooltip={"text": "{tooltip_text}", "style": ESTILO_TOOLTIP_MAPA},
             map_style="light",
         ),
         key=key,
@@ -602,10 +605,14 @@ st.markdown(
     }}
 
     /* Mapa (pydeck): el cuadro de información al pasar el mouse siempre por encima y legible */
+    [data-testid="stDeckGlJsonChart"],
+    [data-testid="stDeckGlJsonChart"] > div,
+    [data-testid="stDeckGlJsonChart"] > div > div,
+    [data-testid="stDeckGlJsonChart"] > div > div > div {{
+        overflow: visible !important;
+    }}
     [data-testid="stDeckGlJsonChart"] {{
         position: relative;
-        border-radius: 12px;
-        overflow: visible;
     }}
     .deck-tooltip {{
         z-index: 9999 !important;
@@ -1187,52 +1194,35 @@ if modulo_activo.startswith("🔁"):
             )
         consulta_punto = st.session_state.get("resultado_busqueda_punto")
 
-    capas_mapa = st.multiselect(
-        "Fuentes que se muestran en el mapa",
-        list(FUENTE_COLOR_ICONO.keys()),
-        default=list(FUENTE_COLOR_ICONO.keys()),
-        key="capas_mapa_unico",
-    )
-
     resaltado_mapa = None
     clave_mapa = "mapa_unico_modulo1_sin_busqueda"
-    if consulta_punto is not None:
+
+    if consulta_punto is None:
+        st.info(
+            "Busca un punto arriba para ver aquí su Google Maps, su Street View "
+            "y si hay otros puntos cerca (posible duplicidad) o si está libre "
+            "para análisis."
+        )
+    else:
         lat_c, lon_c = consulta_punto["lat"], consulta_punto["lon"]
         resaltado_mapa = (lat_c, lon_c, consulta_punto["etiqueta"], consulta_punto.get("info_extra", ""))
         clave_mapa = f"mapa_unico_modulo1_{lat_c:.5f}_{lon_c:.5f}"
 
-    mostrar_leyenda_fuentes(incluir_resaltado=consulta_punto is not None)
-    renderizar_mapa_general(
-        df, fuentes_activas=capas_mapa, punto_resaltado=resaltado_mapa,
-        key=clave_mapa, altura=620,
-    )
-    st.caption(
-        "Pasa el mouse sobre un pin para ver toda su información. Si dos "
-        "o más puntos caen en el mismo lugar, se abren uno al lado del otro "
-        "para que ninguno quede tapado."
-    )
-
-    # Aviso: puntos que están uno encima del otro en el mismo lugar.
-    apilados = detectar_apilados(df, capas_mapa)
-    if not apilados.empty:
-        st.warning(
-            f"⚠️ Hay {len(apilados)} lugar(es) con más de un punto en el mismo "
-            "sitio (por ejemplo, uno de Operación encima de uno de Especialistas).",
-            icon="⚠️",
+        # 1) Google Maps y Street View del punto buscado
+        st.markdown("##### Google Maps y Street View")
+        col_mapa, col_calle = st.columns(2)
+        with col_mapa:
+            st.caption("Google Maps")
+            components.iframe(url_mapa_embed(lat_c, lon_c), height=380)
+        with col_calle:
+            st.caption("Street View (vista a nivel de calle)")
+            components.iframe(url_streetview_embed(lat_c, lon_c), height=380)
+        st.caption(
+            "Si el punto está en una zona sin cobertura de Street View, "
+            "Google muestra ahí mismo un aviso de que no hay imagen disponible."
         )
-        with st.expander("Ver cuáles son"):
-            st.dataframe(apilados, use_container_width=True, hide_index=True)
 
-    if consulta_punto is None:
-        st.info(
-            "Busca un punto arriba para ver aquí si hay otros puntos cerca "
-            "(posible duplicidad) o si está libre para análisis, junto con "
-            "su Google Maps y Street View."
-        )
-    else:
-        lat_c, lon_c = consulta_punto["lat"], consulta_punto["lon"]
-        st.button("✖ Quitar la búsqueda", key="quitar_busqueda_mapa_unico", on_click=_limpiar_busqueda_mapa)
-
+        # 2) Resultado: ¿hay algo cerca o está libre?
         cercanos = detectar_coincidencias(df, lat_c, lon_c, consulta_punto.get("etiqueta", ""))
         if id_punto_buscado is not None:
             cercanos = cercanos[cercanos["id"] != id_punto_buscado]
@@ -1272,19 +1262,68 @@ if modulo_activo.startswith("🔁"):
                 "Por qué aparece": cercanos["coincide_por"].values,
             })
             st.dataframe(tabla_cercanos, use_container_width=True, hide_index=True)
+        st.button("✖ Quitar la búsqueda", key="quitar_busqueda_mapa_unico", on_click=_limpiar_busqueda_mapa)
 
-        st.markdown("##### Google Maps y Street View de ese punto")
-        col_mapa, col_calle = st.columns(2)
-        with col_mapa:
-            st.caption("Google Maps")
-            components.iframe(url_mapa_embed(lat_c, lon_c), height=380)
-        with col_calle:
-            st.caption("Street View (vista a nivel de calle)")
-            components.iframe(url_streetview_embed(lat_c, lon_c), height=380)
-        st.caption(
-            "Si el punto está en una zona sin cobertura de Street View, "
-            "Google muestra ahí mismo un aviso de que no hay imagen disponible."
+    # 3) El mapa con todos los puntos (el buscado, en rojo)
+    st.markdown("##### Mapa de todos los puntos")
+    capas_mapa = st.multiselect(
+        "Fuentes que se muestran en el mapa",
+        list(FUENTE_COLOR_ICONO.keys()),
+        default=list(FUENTE_COLOR_ICONO.keys()),
+        key="capas_mapa_unico",
+    )
+    mostrar_leyenda_fuentes(incluir_resaltado=consulta_punto is not None)
+    renderizar_mapa_general(
+        df, fuentes_activas=capas_mapa, punto_resaltado=resaltado_mapa,
+        key=clave_mapa, altura=620,
+    )
+    st.caption(
+        "Pasa el mouse sobre un pin para ver su información. Si dos o más "
+        "puntos caen en el mismo lugar, se abren uno al lado del otro para "
+        "que ninguno quede tapado."
+    )
+
+    # 4) Aviso: puntos que están uno encima del otro en el mismo lugar.
+    apilados = detectar_apilados(df, capas_mapa)
+    if not apilados.empty:
+        st.warning(
+            f"⚠️ Hay {len(apilados)} lugar(es) con más de un punto en el mismo "
+            "sitio (por ejemplo, uno de Operación encima de uno de Especialistas).",
+            icon="⚠️",
         )
+        with st.expander("Ver cuáles son", expanded=True):
+            st.caption("Haz clic en una fila para verla en el mapa, con la información de todos los puntos que coinciden.")
+            evento_apilados = st.dataframe(
+                apilados[COLUMNAS_APILADOS], use_container_width=True, hide_index=True,
+                on_select="rerun", selection_mode="single-row", key="tabla_apilados_mapa_unico",
+            )
+            filas_sel_apilados = list(evento_apilados.selection.rows) if evento_apilados is not None else []
+            if filas_sel_apilados:
+                grupo = apilados.iloc[filas_sel_apilados[0]]
+                puntos_grupo = df[df["id"].isin(grupo["_ids"])].dropna(subset=["latitud", "longitud"])
+                st.markdown(
+                    f"**Estos {len(puntos_grupo)} puntos están en el mismo lugar** — "
+                    "pasa el mouse por cada pin, o mira la tabla de abajo:"
+                )
+                renderizar_mapa_general(
+                    df, fuentes_activas=list(FUENTE_COLOR_ICONO.keys()),
+                    punto_resaltado=None,
+                    key=f"mapa_apilados_{filas_sel_apilados[0]}_{grupo['Coordenada']}",
+                    altura=460, centro=(grupo["_lat"], grupo["_lon"], 18),
+                    solo_ids=list(grupo["_ids"]),
+                )
+                st.dataframe(
+                    pd.DataFrame({
+                        "Fuente": puntos_grupo["fuente"].values,
+                        "Nombre": puntos_grupo["local_identificado"].values,
+                        "Responsable": puntos_grupo["especialista"].replace("", "—").values,
+                        "Practicante": puntos_grupo["practicante"].replace("", "—").values if "practicante" in puntos_grupo.columns else "—",
+                        "Estado": puntos_grupo["estado"].replace("", "Pendiente").values,
+                        "Fecha de registro": puntos_grupo["fecha_registro"].replace("", "—").values,
+                        "Ciudad": puntos_grupo["ciudad"].replace("", "—").values,
+                    }),
+                    use_container_width=True, hide_index=True,
+                )
 
     st.divider()
     st.markdown("#### 📋 Posibles duplicados")
