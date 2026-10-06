@@ -42,6 +42,16 @@ _SEMAFORO_SVG = (
 )
 
 
+# Estación / parada de TransMilenio (cuadro rojo con "TM"), dibujada en SVG.
+_TM_SVG = (
+    "data:image/svg+xml;utf8,"
+    "%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 32 32'%3E"
+    "%3Crect x='1.5' y='1.5' width='29' height='29' rx='7' fill='%23D5281B' stroke='%23fff' stroke-width='3'/%3E"
+    "%3Ctext x='16' y='21.5' font-family='Arial,Helvetica,sans-serif' font-size='14' font-weight='700' "
+    "text-anchor='middle' fill='%23fff'%3ETM%3C/text%3E%3C/svg%3E"
+)
+
+
 def _lineas_punto(row) -> list:
     def v(col):
         x = row.get(col, "")
@@ -163,6 +173,7 @@ def construir_html_mapa(
             for e in ESTADOS_TIENDA
         ] if tds else [],
         "semaforo": _SEMAFORO_SVG,
+        "tm": _TM_SVG,
         "rojo_hex": colores_hex.get("rojo", "#E11E1E"),
     }
     datos_json = json.dumps(datos, ensure_ascii=False).replace("</", "<\\/")
@@ -185,6 +196,10 @@ _PLANTILLA = r"""<!DOCTYPE html>
   .chip img { height:16px; width:auto; display:block; }
   .chip .n { color:#6B6B70; font-size:12.5px; }
   .chip.fijo { cursor:default; font-weight:700; }
+  .seg { display:inline-flex; border:1px solid #D9D9DE; border-radius:999px; overflow:hidden; background:#fff; }
+  .seg button { border:0; background:#fff; padding:6px 14px; font-size:14px; cursor:pointer; color:#1A1A1A; }
+  .seg button.on { background:#E11E1E; color:#fff; font-weight:700; }
+  .oculto { display:none !important; }
   .sep { width:1px; height:22px; background:#D9D9DE; margin:0 4px; }
   select, .btn { font-size:14px; border:1px solid #D9D9DE; border-radius:8px; background:#fff; padding:5px 9px; color:#1A1A1A; cursor:pointer; }
   #mapwrap { position:relative; flex:1; min-height:200px; border:1px solid #D9D9DE; border-radius:12px; overflow:hidden; background:#E6E3DD; }
@@ -192,6 +207,7 @@ _PLANTILLA = r"""<!DOCTYPE html>
   #map.drag { cursor:grabbing; }
   #tiles, #marks { position:absolute; left:0; top:0; width:100%; height:100%; }
   #tiles { z-index:0; overflow:hidden; }
+  #tiles.suave img { filter: grayscale(1) contrast(.72) brightness(1.2); }
   #marks { z-index:1; }
   #tiles img { position:absolute; left:0; top:0; max-width:none; user-select:none; -webkit-user-drag:none; pointer-events:none; }
   .mk { position:absolute; left:0; top:0; will-change:transform; }
@@ -237,11 +253,9 @@ function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
 
 /* ---------- mapas base ---------- */
 var BASES = {
-  calles:  {nombre:'Calles (claro y con nombres grandes)', url:'https://tile.openstreetmap.org/{z}/{x}/{y}.png', max:19, attr:'© OpenStreetMap'},
-  claro:   {nombre:'Calles (suave)', url:'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png', max:20, sub:['a','b','c','d'], attr:'© OpenStreetMap © CARTO'},
-  satelite:{nombre:'Satélite', url:'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', max:19, attr:'Imágenes © Esri'}
+  osm: {url:'https://tile.openstreetmap.org/{z}/{x}/{y}.png', max:19, attr:'© OpenStreetMap'}
 };
-var S = { base:'calles', big:true, sem:true };
+var S = { base:'osm', mode:'simple', big:false, sem:false, tm:false };
 
 /* ---------- proyección (Web Mercator) ---------- */
 function ws(z){ return 256*Math.pow(2,z); }
@@ -325,19 +339,37 @@ if(D.tiendas_cfg.length){
     });
   });
 }
-var s2=document.createElement('span'); s2.className='sep'; bar.appendChild(s2);
-chip('<img src="'+D.semaforo+'" style="height:18px"> Semáforos', true, function(b){
-  S.sem=!S.sem; b.classList.toggle('off',!S.sem); refresh(); fetchSignals();
-});
-chip('Aa Letras grandes', true, function(b){ S.big=!S.big; b.classList.toggle('off',!S.big); refresh(); });
-var sel=document.createElement('select');
-Object.keys(BASES).forEach(function(k){ var o=document.createElement('option'); o.value=k; o.textContent='Mapa: '+BASES[k].nombre; sel.appendChild(o); });
-sel.addEventListener('change',function(){ S.base=sel.value; $('attr').textContent=BASES[S.base].attr; refresh(); });
-bar.appendChild(sel);
-$('attr').textContent=BASES[S.base].attr;
+var chipSem=chip('<img src="'+D.semaforo+'" style="height:18px"> Semáforos', true, function(b){
+  S.sem=!S.sem; b.classList.toggle('off',!S.sem); refresh(); fetchExtra();
+}, 'solo-detalle');
+var chipTm=chip('<img src="'+D.tm+'" style="height:18px"> TransMilenio', true, function(b){
+  S.tm=!S.tm; b.classList.toggle('off',!S.tm); refresh(); fetchExtra();
+}, 'solo-detalle');
+var chipBig=chip('Aa Letras grandes', false, function(b){ S.big=!S.big; b.classList.toggle('off',!S.big); refresh(); });
+$('attr').textContent=BASES.osm.attr;
 
-/* ---------- semáforos (OpenStreetMap vía Overpass) ---------- */
-var signals = {};          // id -> marcador
+/* Dos formas de ver el mapa: simple (limpio, poco saturado) y detallado (calles,
+   direcciones, semáforos y TransMilenio). */
+function setMode(m){
+  S.mode=m; S.big=(m==='detalle'); S.sem=(m==='detalle'); S.tm=(m==='detalle');
+  tilesEl.classList.toggle('suave', m==='simple');
+  segBtns.simple.classList.toggle('on', m==='simple'); segBtns.detalle.classList.toggle('on', m==='detalle');
+  chipSem.classList.toggle('oculto', m==='simple'); chipTm.classList.toggle('oculto', m==='simple');
+  chipSem.classList.toggle('off', !S.sem); chipTm.classList.toggle('off', !S.tm); chipBig.classList.toggle('off', !S.big);
+  setEstado(''); refresh(); fetchExtra();
+}
+var seg=document.createElement('span'); seg.className='seg';
+var segBtns={};
+[['simple','Mapa simple'],['detalle','Mapa detallado']].forEach(function(x){
+  var b=document.createElement('button'); b.type='button'; b.textContent=x[1];
+  b.addEventListener('click',function(){ setMode(x[0]); });
+  seg.appendChild(b); segBtns[x[0]]=b;
+});
+bar.insertBefore(seg, bar.firstChild);
+var sepSeg=document.createElement('span'); sepSeg.className='sep'; bar.insertBefore(sepSeg, seg.nextSibling);
+
+/* ---------- semáforos y TransMilenio (OpenStreetMap vía Overpass) ---------- */
+var extras = {};           // id -> marcador
 var sigCells = {};         // celda -> 'ok' | 'cargando' | 'fallo'
 var sigQueue = [], sigActive = 0, sigFail = 0;
 function setEstado(t){ var e=$('estado'); if(t){ e.textContent=t; e.style.display='block'; } else { e.style.display='none'; } }
@@ -345,27 +377,43 @@ function sigPump(){
   while(sigActive<2 && sigQueue.length){
     var c=sigQueue.shift(); sigActive++;
     (function(c){
-      var step=0.01;
-      var q='[out:json][timeout:20];node["highway"="traffic_signals"]('+(c.i*step)+','+(c.j*step)+','+((c.i+1)*step)+','+((c.j+1)*step)+');out;';
+      var step=0.01, bb='('+(c.i*step)+','+(c.j*step)+','+((c.i+1)*step)+','+((c.j+1)*step)+')';
+      var re='[~"^(network|operator)$"~"transmilenio",i]';
+      var q='[out:json][timeout:25];('
+        +'node["highway"="traffic_signals"]'+bb+';'
+        +'node'+re+'["highway"="bus_stop"]'+bb+';'
+        +'node'+re+'["public_transport"="station"]'+bb+';'
+        +'way'+re+'["public_transport"="station"]'+bb+';'
+        +'node'+re+'["amenity"="bus_station"]'+bb+';'
+        +');out center tags;';
       var done=false;
       function fin(ok){
         if(done) return; done=true; sigActive--; sigCells[c.key]=ok?'ok':'fallo'; if(!ok) sigFail++;
-        if(!sigQueue.length && !sigActive) setEstado(sigFail && !Object.keys(signals).length ? 'No se pudieron cargar los semáforos' : '');
+        if(!sigQueue.length && !sigActive) setEstado(sigFail && !Object.keys(extras).length ? 'No se pudieron cargar los semáforos / TransMilenio' : '');
         refresh(); sigPump();
       }
       try{
         fetch('https://overpass-api.de/api/interpreter',{method:'POST',body:'data='+encodeURIComponent(q),headers:{'Content-Type':'application/x-www-form-urlencoded'}})
           .then(function(r){ if(!r.ok) throw new Error('http'); return r.json(); })
-          .then(function(j){ (j.elements||[]).forEach(function(e){ if(e.lat===undefined||signals[e.id]) return;
-              signals[e.id]=addMark({kind:'s', a:e.lat, o:e.lon, grp:'__sem', src:D.semaforo, t:'Semáforo', l:[], z:3}); }); fin(true); })
+          .then(function(j){ (j.elements||[]).forEach(function(e){
+              var la=e.lat!==undefined?e.lat:(e.center?e.center.lat:undefined), lo=e.lon!==undefined?e.lon:(e.center?e.center.lon:undefined);
+              var id=e.type+e.id; if(la===undefined||extras[id]) return;
+              var tg=e.tags||{};
+              if(tg.highway==='traffic_signals'){
+                extras[id]=addMark({kind:'s', a:la, o:lo, grp:'__sem', src:D.semaforo, t:'Semáforo', l:[], z:3});
+              } else {
+                var nom=tg.name||'Parada / estación';
+                extras[id]=addMark({kind:'m', a:la, o:lo, grp:'__tm', src:D.tm, t:nom, l:['TransMilenio'+(tg.operator&&!/transmilenio/i.test(tg.operator)?' · '+tg.operator:'')], z:3});
+              }
+            }); fin(true); })
           .catch(function(){ fin(false); });
       }catch(e){ fin(false); }
     })(c);
   }
 }
-function fetchSignals(){
-  if(!S.sem){ setEstado(''); return; }
-  if(view.z<15.2){ setEstado(view.z>=13.5 ? 'Acércate un poco más para ver los semáforos' : ''); return; }
+function fetchExtra(){
+  if(!S.sem && !S.tm){ setEstado(''); return; }
+  if(view.z<15.2){ setEstado(view.z>=13.5 ? 'Acércate un poco más para ver los semáforos y TransMilenio' : ''); return; }
   var c=proj(view.lat,view.lon,view.z);
   var tl=unproj(c[0]-W/2, c[1]-H/2, view.z), br=unproj(c[0]+W/2, c[1]+H/2, view.z);
   var step=0.01;
@@ -375,13 +423,13 @@ function fetchSignals(){
     var key=i+'_'+j; if(sigCells[key]) continue;
     sigCells[key]='cargando'; sigQueue.push({key:key,i:i,j:j}); nuevas++;
   }}
-  if(nuevas) setEstado('Cargando semáforos…'); else if(!sigQueue.length && !sigActive) setEstado('');
+  if(nuevas) setEstado('Cargando semáforos y TransMilenio…'); else if(!sigQueue.length && !sigActive) setEstado('');
   sigPump();
 }
 
 /* ---------- tarjeta de información ---------- */
 function tipHtml(m, fijada){
-  var h='<div class="tt">'+(m.kind==='r'?'🔎 ':(m.kind==='t'?'🏪 ':'📍 '))+esc(m.t)+'</div>';
+  var h='<div class="tt">'+(m.kind==='r'?'🔎 ':(m.kind==='t'?'🏪 ':(m.kind==='m'?'🚌 ':'📍 ')))+esc(m.t)+'</div>';
   m.l.forEach(function(x){ h+='<div>'+esc(x)+'</div>'; });
   if(m.stack>1) h+='<div class="ap">⚠️ Hay '+m.stack+' puntos en este mismo lugar</div>';
   h+='<div class="pie">'+(fijada?'Clic de nuevo para cerrar':'Clic para dejar la tarjeta fija')+'</div>';
@@ -397,7 +445,7 @@ function placeTip(m){
   var w=tip.offsetWidth, h=tip.offsetHeight, gap=26;
   var x=m.x+gap; if(x+w>W-8) x=m.x-gap-w;
   x=clamp(x,8,Math.max(8,W-w-8));
-  var y=m.y-h/2-(m.kind==='t'?0:18);
+  var y=m.y-h/2-((m.kind==='t'||m.kind==='m')?0:18);
   y=clamp(y,8,Math.max(8,H-h-8));
   tip.style.left=x+'px'; tip.style.top=y+'px';
 }
@@ -450,6 +498,7 @@ function sizeFor(m){
   var z=view.z;
   if(m.kind==='t'){ var w=z<11?18:(z<13?24:(z<15?32:42)); return [w, w*m.h/m.w]; }
   if(m.kind==='s'){ var s=z<17?14:(z<18?18:22); return [s*0.55, s]; }
+  if(m.kind==='m'){ var q=z<16.5?18:(z<17.5?22:26); return [q, q]; }
   var hgt = m.kind==='r' ? (z<12?46:54) : (z<11?22:(z<13?28:(z<15?34:40)));
   return [hgt*64/88, hgt];
 }
@@ -463,6 +512,7 @@ function render(){
     if(m.kind==='p') m.vis=!!capaOn[m.grp];
     else if(m.kind==='t') m.vis=!!tiendaOn[m.grp];
     else if(m.kind==='s') m.vis=S.sem && view.z>=15.2;
+    else if(m.kind==='m') m.vis=S.tm && view.z>=15.2;
     else m.vis=true;
     m.ox=0; m.oy=0; m.stack=1;
     if(m.vis && (m.kind==='p'||m.kind==='r')){
@@ -504,7 +554,7 @@ window.addEventListener('pointermove',function(e){
   if(moved>4){ mapEl.classList.add('drag'); if(!pinned) hideTip();
     var c=proj(drag.lat,drag.lon,view.z), g=unproj(c[0]-dx,c[1]-dy,view.z); view.lat=g[0]; view.lon=g[1]; refresh(); }
 });
-window.addEventListener('pointerup',function(){ if(drag){ drag=null; mapEl.classList.remove('drag'); fetchSignals(); } });
+window.addEventListener('pointerup',function(){ if(drag){ drag=null; mapEl.classList.remove('drag'); fetchExtra(); } });
 mapEl.addEventListener('click',function(){ if(moved>4) return; if(pinned){ pinned=null; hideTip(); } });
 function zoomAt(px,py,nz){
   nz=clamp(nz,MIN_Z,MAX_Z); var c=proj(view.lat,view.lon,view.z);
@@ -516,11 +566,11 @@ var wheelT=null;
 mapEl.addEventListener('wheel',function(e){
   e.preventDefault(); var r=wrap.getBoundingClientRect();
   zoomAt(e.clientX-r.left,e.clientY-r.top, view.z + clamp(-e.deltaY*0.0016,-0.6,0.6));
-  clearTimeout(wheelT); wheelT=setTimeout(fetchSignals,350);
+  clearTimeout(wheelT); wheelT=setTimeout(fetchExtra,350);
 },{passive:false});
-mapEl.addEventListener('dblclick',function(e){ var r=wrap.getBoundingClientRect(); zoomAt(e.clientX-r.left,e.clientY-r.top,view.z+1); fetchSignals(); });
-$('zin').addEventListener('click',function(){ zoomAt(W/2,H/2,view.z+1); fetchSignals(); });
-$('zout').addEventListener('click',function(){ zoomAt(W/2,H/2,view.z-1); fetchSignals(); });
+mapEl.addEventListener('dblclick',function(e){ var r=wrap.getBoundingClientRect(); zoomAt(e.clientX-r.left,e.clientY-r.top,view.z+1); fetchExtra(); });
+$('zin').addEventListener('click',function(){ zoomAt(W/2,H/2,view.z+1); fetchExtra(); });
+$('zout').addEventListener('click',function(){ zoomAt(W/2,H/2,view.z-1); fetchExtra(); });
 window.addEventListener('resize',refresh);
 
 /* ---------- vista inicial ---------- */
@@ -540,7 +590,8 @@ function fit(list){
 }
 if(D.centro){ view.lat=D.centro[0]; view.lon=D.centro[1]; view.z=D.centro[2]; }
 else { var rr=marks.filter(function(m){return m.kind==='r';}); if(rr.length) fit(rr); }
-render(); setTimeout(function(){ render(); fetchSignals(); },60);
+setMode('simple');
+render(); setTimeout(function(){ render(); fetchExtra(); },60);
 })();
 </script></body></html>
 """
