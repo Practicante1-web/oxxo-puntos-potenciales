@@ -1237,10 +1237,11 @@ if modulo_activo.startswith("🔁"):
     )
     st.caption(
         "Pasa el mouse sobre un pin o una tienda para ver su información "
-        "(clic para dejar la tarjeta fija). Arriba del mapa puedes prender y "
-        "apagar cada capa, los semáforos, el tamaño de las letras y cambiar a "
-        "satélite. Si dos o más puntos caen en el mismo lugar, se abren uno al "
-        "lado del otro para que ninguno quede tapado."
+        "(clic para dejar la tarjeta fija). Arriba del mapa eliges entre "
+        "**Mapa simple** (limpio, poco saturado) y **Mapa detallado** (calles "
+        "con nombres grandes, semáforos y TransMilenio), y prendes o apagas "
+        "cada capa. Si dos o más puntos caen en el mismo lugar, se abren uno "
+        "al lado del otro para que ninguno quede tapado."
     )
     if error_tiendas:
         st.warning(f"No se pudieron cargar las tiendas OXXO: {error_tiendas}", icon="⚠️")
