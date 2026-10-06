@@ -207,7 +207,7 @@ _PLANTILLA = r"""<!DOCTYPE html>
   #map.drag { cursor:grabbing; }
   #tiles, #marks { position:absolute; left:0; top:0; width:100%; height:100%; }
   #tiles { z-index:0; overflow:hidden; }
-  #tiles.suave img { filter: grayscale(1) contrast(.72) brightness(1.2); }
+  #tiles img.suave { filter: grayscale(1) contrast(.72) brightness(1.2); }
   #marks { z-index:1; }
   #tiles img { position:absolute; left:0; top:0; max-width:none; user-select:none; -webkit-user-drag:none; pointer-events:none; }
   .mk { position:absolute; left:0; top:0; will-change:transform; }
@@ -253,9 +253,11 @@ function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
 
 /* ---------- mapas base ---------- */
 var BASES = {
-  osm: {url:'https://tile.openstreetmap.org/{z}/{x}/{y}.png', max:19, attr:'© OpenStreetMap'}
+  osm: {url:'https://tile.openstreetmap.org/{z}/{x}/{y}.png', max:19, attr:'© OpenStreetMap'},
+  gris: {url:'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', max:16, attr:'© Esri, © OpenStreetMap'},
+  grisref: {url:'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}', max:16, attr:''}
 };
-var S = { base:'osm', mode:'simple', big:false, sem:false, tm:false };
+var S = { mode:'simple', big:false, sem:false, tm:false };
 
 /* ---------- proyección (Web Mercator) ---------- */
 function ws(z){ return 256*Math.pow(2,z); }
@@ -346,13 +348,11 @@ var chipTm=chip('<img src="'+D.tm+'" style="height:18px"> TransMilenio', true, f
   S.tm=!S.tm; b.classList.toggle('off',!S.tm); refresh(); fetchExtra();
 }, 'solo-detalle');
 var chipBig=chip('Aa Letras grandes', false, function(b){ S.big=!S.big; b.classList.toggle('off',!S.big); refresh(); });
-$('attr').textContent=BASES.osm.attr;
 
 /* Dos formas de ver el mapa: simple (limpio, poco saturado) y detallado (calles,
    direcciones, semáforos y TransMilenio). */
 function setMode(m){
-  S.mode=m; S.big=(m==='detalle'); S.sem=(m==='detalle'); S.tm=(m==='detalle');
-  tilesEl.classList.toggle('suave', m==='simple');
+  S.mode=m; S.big=false; S.sem=(m==='detalle'); S.tm=(m==='detalle');
   segBtns.simple.classList.toggle('on', m==='simple'); segBtns.detalle.classList.toggle('on', m==='detalle');
   chipSem.classList.toggle('oculto', m==='simple'); chipTm.classList.toggle('oculto', m==='simple');
   chipSem.classList.toggle('off', !S.sem); chipTm.classList.toggle('off', !S.tm); chipBig.classList.toggle('off', !S.big);
@@ -458,38 +458,54 @@ function tileUrl(b,z,x,y){
   if(bm.sub) u=u.replace('{s}',bm.sub[(x+y)%bm.sub.length]);
   return u;
 }
-function renderTiles(cx,cy){
-  var bm=BASES[S.base], k=S.big?1.5:1;
-  var tz=clamp(Math.floor(view.z-Math.log(k)/Math.LN2),0,bm.max);
-  var sc=Math.pow(2,view.z-tz), ts=256*sc, n=Math.pow(2,tz);
-  var x0=Math.floor((cx-W/2)/ts), x1=Math.floor((cx+W/2)/ts), y0=Math.floor((cy-H/2)/ts), y1=Math.floor((cy+H/2)/ts);
-  var used={};
-  for(var ty=y0;ty<=y1;ty++){ if(ty<0||ty>=n) continue;
-    for(var tx=x0;tx<=x1;tx++){
-      var txw=((tx%n)+n)%n, key=S.base+'/'+tz+'/'+tx+'/'+ty; used[key]=1;
-      if(!tileCache[key]){
-        var im=document.createElement('img'); im.src=tileUrl(S.base,tz,txw,ty); im.draggable=false;
-        im.onerror=function(){ this.style.visibility='hidden'; };
-        tilesEl.appendChild(im);
-        tileCache[key]={el:im,tz:tz,tx:tx,ty:ty,base:S.base};
-      }
-      tileCache[key].used=1;
-    }
+function capasBase(){
+  /* Mapa simple: gris claro de Esri (como el mapa claro de antes) hasta el zoom 16;
+     más cerca se usa OpenStreetMap en gris suave. Mapa detallado: OpenStreetMap a color. */
+  if(S.mode==='simple'){
+    if(view.z<=16.5) return [{id:'gris',cls:'',o:0},{id:'grisref',cls:'',o:1}];
+    return [{id:'osm',cls:'suave',o:0}];
   }
+  return [{id:'osm',cls:'',o:0}];
+}
+function renderTiles(cx,cy){
+  var caps=capasBase(), used={}, activas={};
+  var k=S.big?1.5:1;
+  caps.forEach(function(cp){
+    activas[cp.id+'|'+cp.cls]=1;
+    var bm=BASES[cp.id];
+    var tz=S.big ? Math.floor(view.z-Math.log(k)/Math.LN2) : Math.floor(view.z+0.7);
+    tz=clamp(tz,0,bm.max);
+    var sc=Math.pow(2,view.z-tz), ts=256*sc, n=Math.pow(2,tz);
+    var x0=Math.floor((cx-W/2)/ts), x1=Math.floor((cx+W/2)/ts), y0=Math.floor((cy-H/2)/ts), y1=Math.floor((cy+H/2)/ts);
+    for(var ty=y0;ty<=y1;ty++){ if(ty<0||ty>=n) continue;
+      for(var tx=x0;tx<=x1;tx++){
+        var txw=((tx%n)+n)%n, key=cp.id+'|'+cp.cls+'/'+tz+'/'+tx+'/'+ty; used[key]=1;
+        if(!tileCache[key]){
+          var im=document.createElement('img'); im.src=tileUrl(cp.id,tz,txw,ty); im.draggable=false;
+          if(cp.cls) im.className=cp.cls;
+          im.onerror=function(){ this.style.visibility='hidden'; };
+          tilesEl.appendChild(im);
+          tileCache[key]={el:im,tz:tz,tx:tx,ty:ty,lay:cp.id+'|'+cp.cls,o:cp.o};
+        }
+        tileCache[key].used=1;
+      }
+    }
+  });
+  $('attr').textContent = S.mode==='simple' ? (view.z<=16.5 ? BASES.gris.attr : '© OpenStreetMap') : BASES.osm.attr;
   Object.keys(tileCache).forEach(function(key){
     var t=tileCache[key];
     var s2=Math.pow(2,view.z-t.tz), size=256*s2;
     t.el.style.width=(size+0.6)+'px'; t.el.style.height=(size+0.6)+'px';
     t.el.style.transform='translate('+(W/2+t.tx*size-cx)+'px,'+(H/2+t.ty*size-cy)+'px)';
-    t.el.style.zIndex=t.tz;
-    t.el.style.display = (t.base===S.base)?'block':'none';
+    t.el.style.zIndex=t.o*100+t.tz;
+    t.el.style.display = activas[t.lay]?'block':'none';
     if(!used[key]) t.used=0;
   });
   clearTimeout(cleanTimer);
   cleanTimer=setTimeout(function(){
     Object.keys(tileCache).forEach(function(key){
       var t=tileCache[key];
-      if(!t.used || t.base!==S.base){ if(t.el.parentNode) t.el.parentNode.removeChild(t.el); delete tileCache[key]; }
+      if(!t.used || !activas[t.lay]){ if(t.el.parentNode) t.el.parentNode.removeChild(t.el); delete tileCache[key]; }
     });
   },450);
 }
