@@ -1222,11 +1222,13 @@ def _a_numero_coordenada(serie: pd.Series) -> pd.Series:
 def _buscar_encabezado_tiendas(crudo: pd.DataFrame, max_filas: int = 30) -> int:
     """Fila (0, 1, 2…) donde parecen estar los títulos de las columnas."""
     claves = ("latitud", "longitud", "lat", "lon", "estado", "estatus", "status", "tienda",
-              "nombre", "crm", "ciudad", "direccion", "coordenada", "apertura", "ubicacion")
+              "nombre", "crm", "ciudad", "direccion", "coordenada", "apertura", "ubicacion",
+              "fecha ape", "dias op", "trafico", "ticket", "ventas")
+    exactas = ("x", "y", "et", "dia")
     mejor, mejor_fila = 0, 0
     for i in range(min(max_filas, len(crudo))):
         celdas = [normalizar_texto(x) for x in crudo.iloc[i].tolist()]
-        puntaje = sum(1 for c in celdas if c and any(k == c or k in c for k in claves))
+        puntaje = sum(1 for c in celdas if c and (c in exactas or any(k == c or k in c for k in claves)))
         if puntaje > mejor:
             mejor, mejor_fila = puntaje, i
     return mejor_fila
@@ -1263,13 +1265,39 @@ def parsear_tiendas(crudo: pd.DataFrame) -> pd.DataFrame:
                 return c
         return None
 
-    col_lat = primera("latitud", "lat", contiene=("latitud",))
-    col_lon = primera("longitud", "lon", "lng", "long", contiene=("longitud",))
+    # Latitud / longitud: se buscan por el CONTENIDO (números con decimales que
+    # caen dentro de Colombia), ayudándose del nombre de la columna cuando
+    # existe ('Latitud', 'Y', 'Coordenada X'…). Así funciona aunque las
+    # columnas se llamen simplemente X e Y.
+    def _mejor_coord(rango_abs, pistas_nombre, excluir=()):
+        mejor_col, mejor_p = None, 0.0
+        for c in tabla.columns:
+            if c in excluir:
+                continue
+            v = _a_numero_coordenada(tabla[c])
+            validos = int(v.notna().sum())
+            if validos < 3:
+                continue
+            dentro = v.abs().between(*rango_abs).sum() / validos
+            con_decimales = ((v % 1) != 0).sum() / validos
+            if con_decimales < 0.5:
+                continue
+            p = float(dentro)
+            if normal[c] in pistas_nombre or any(k in normal[c] for k in pistas_nombre if len(k) > 2):
+                p += 0.5
+            if p > mejor_p and dentro >= 0.6:
+                mejor_col, mejor_p = c, p
+        return mejor_col
+
+    col_lat = _mejor_coord((0.0, 14.0), ("latitud", "lat", "y", "coord y", "coordenada y"))
+    col_lon = _mejor_coord((66.0, 82.0), ("longitud", "lon", "lng", "long", "x", "coord x", "coordenada x"),
+                           excluir=(col_lat,) if col_lat else ())
     col_coord = primera("coordenadas", "coordenada", contiene=("coordenada",))
 
     if col_lat and col_lon:
         lat = _a_numero_coordenada(tabla[col_lat])
         lon = _a_numero_coordenada(tabla[col_lon])
+        diag["columna_latitud"], diag["columna_longitud"] = col_lat, col_lon
     elif col_coord:
         pares = tabla[col_coord].apply(parsear_coordenada_pegada)
         lat = pares.apply(lambda x: x[0] if x else float("nan"))
@@ -1293,8 +1321,14 @@ def parsear_tiendas(crudo: pd.DataFrame) -> pd.DataFrame:
         if n_rec > mejor_n:
             mejor_col, mejor_n = c, n_rec
     diag["columna_estado"] = mejor_col
-    estado = (tabla[mejor_col].apply(estado_tienda_desde_texto) if mejor_col
-              else pd.Series([""] * len(tabla), index=tabla.index))
+    if mejor_col:
+        estado = tabla[mejor_col].apply(estado_tienda_desde_texto)
+    else:
+        # Sin ninguna columna de estado reconocible: se asume que todas las
+        # filas son tiendas abiertas (la hoja trae las tiendas que operan) y
+        # se avisa en el diagnóstico para que no pase desapercibido.
+        estado = pd.Series(["Abierta"] * len(tabla), index=tabla.index)
+        diag["estado_asumido"] = True
     if mejor_col:
         no_rec = tabla.loc[estado == "", mejor_col].astype(str).str.strip()
         no_rec = no_rec[(no_rec != "") & (no_rec.str.lower() != "nan")]
@@ -1304,7 +1338,8 @@ def parsear_tiendas(crudo: pd.DataFrame) -> pd.DataFrame:
                          "pdv", "sitio", "local", contiene=("nombre", "tienda"))
     col_ciudad = primera("ciudad", "municipio", "plaza", "region", contiene=("ciudad", "municipio"))
     col_dir = primera("direccion", "direccion tienda", contiene=("direccion",))
-    col_crm = primera("crm", "id", "codigo", "cod", "codigo tienda", contiene=("crm",))
+    col_crm = primera("crm", "id", "codigo", "cod", "codigo tienda", "cr", contiene=("crm",))
+    col_apertura = primera("fecha ape", "fecha apertura", "apertura", "fecha de apertura", contiene=("fecha ape", "apertura"))
 
     def txt(col):
         if col is None:
@@ -1315,6 +1350,11 @@ def parsear_tiendas(crudo: pd.DataFrame) -> pd.DataFrame:
     crm = txt(col_crm)
     nombre = nombre.where(nombre != "", crm)
     detalle = crm.where(crm == "", "CRM: " + crm)
+    if col_apertura is not None:
+        fechas = pd.to_datetime(tabla[col_apertura], errors="coerce", dayfirst=True)
+        txt_fecha = fechas.dt.strftime("%d/%m/%Y").fillna("")
+        detalle = (detalle + " · Apertura: " + txt_fecha).where(txt_fecha != "", detalle)
+    nombre = nombre.where(nombre != "", "Tienda OXXO")
 
     resultado = pd.DataFrame({
         "nombre": nombre, "estado_tienda": estado, "ciudad": txt(col_ciudad).apply(normalizar_ciudad),
