@@ -1251,16 +1251,19 @@ if modulo_activo.startswith("🔁"):
 
     # 3) El mapa con todos los puntos y tiendas (el buscado, en rojo)
     st.markdown("##### Mapa")
+    solo_cerca = False
     if resaltado_mapa is not None:
-        st.caption(
-            "📍 Mostrando solo lo que está a menos de 300 m del punto buscado. "
-            "Con «✖ Quitar la búsqueda» vuelve a aparecer todo."
+        _vista = st.radio(
+            "¿Qué quieres ver en el mapa?",
+            ["📍 Solo lo cercano (a menos de 300 m)", "🗺️ Todo (con la búsqueda marcada en rojo)"],
+            horizontal=True, key="vista_mapa_busqueda",
         )
+        solo_cerca = _vista.startswith("📍")
     renderizar_mapa_general(
         df, fuentes_activas=list(FUENTE_COLOR_ICONO.keys()), punto_resaltado=resaltado_mapa,
         key=clave_mapa, altura=640, df_tiendas=df_tiendas,
-        radio_cerca_m=300 if resaltado_mapa is not None else None,
-        centro=(resaltado_mapa[0], resaltado_mapa[1], 17) if resaltado_mapa is not None else None,
+        radio_cerca_m=300 if solo_cerca else None,
+        centro=(resaltado_mapa[0], resaltado_mapa[1], 17 if solo_cerca else 16) if resaltado_mapa is not None else None,
     )
     st.caption(
         "Pasa el mouse sobre un pin o una tienda para ver su información "
