@@ -274,9 +274,22 @@ def detectar_apilados(df, fuentes_activas) -> pd.DataFrame:
     return pd.DataFrame(filas).sort_values("Cuántos", ascending=False).reset_index(drop=True)
 
 
+def _solo_cerca(tabla, lat, lon, radio_m):
+    """Filas de `tabla` (con columnas latitud/longitud) a `radio_m` metros o menos de (lat, lon)."""
+    import numpy as np
+    if tabla is None or len(tabla) == 0:
+        return tabla
+    la = pd.to_numeric(tabla["latitud"], errors="coerce").to_numpy(dtype=float)
+    lo = pd.to_numeric(tabla["longitud"], errors="coerce").to_numpy(dtype=float)
+    p1, p2 = np.radians(la), np.radians(lat)
+    a = np.sin((p2 - p1) / 2) ** 2 + np.cos(p1) * np.cos(p2) * np.sin(np.radians(lon - lo) / 2) ** 2
+    dist = 2 * 6371000.0 * np.arcsin(np.sqrt(a))
+    return tabla[np.nan_to_num(dist, nan=1e12) <= radio_m]
+
+
 def renderizar_mapa_general(
     df, fuentes_activas, punto_resaltado=None, key="mapa_general", altura=620,
-    centro=None, solo_ids=None, df_tiendas=None, mostrar_capas_vacias=True,
+    centro=None, solo_ids=None, df_tiendas=None, mostrar_capas_vacias=True, radio_cerca_m=None,
 ):
     """
     Dibuja el mapa combinado del Módulo 1 como una página de mapa propia
@@ -290,6 +303,8 @@ def renderizar_mapa_general(
     - Los pines que caen en el mismo lugar se abren en abanico, y la tarjeta
       de información siempre queda dentro del marco del mapa.
     - Las capas se prenden y apagan dentro del propio mapa.
+    - radio_cerca_m: si se da y hay un punto resaltado, el mapa solo muestra
+      los puntos y tiendas a esa distancia (en metros) o menos del punto buscado.
     """
     resaltados = _resaltados_a_lista(punto_resaltado)
 
@@ -298,6 +313,10 @@ def renderizar_mapa_general(
         puntos = df[df["fuente"].isin(fuentes_activas)]
         if solo_ids is not None:
             puntos = puntos[puntos["id"].isin(solo_ids)]
+
+    if radio_cerca_m and resaltados:
+        puntos = _solo_cerca(puntos, resaltados[0][0], resaltados[0][1], radio_cerca_m)
+        df_tiendas = _solo_cerca(df_tiendas, resaltados[0][0], resaltados[0][1], radio_cerca_m)
 
     colores_fuente = dict(FUENTE_COLOR_ICONO)
     if not mostrar_capas_vacias:
@@ -1232,9 +1251,16 @@ if modulo_activo.startswith("🔁"):
 
     # 3) El mapa con todos los puntos y tiendas (el buscado, en rojo)
     st.markdown("##### Mapa")
+    if resaltado_mapa is not None:
+        st.caption(
+            "📍 Mostrando solo lo que está a menos de 300 m del punto buscado. "
+            "Con «✖ Quitar la búsqueda» vuelve a aparecer todo."
+        )
     renderizar_mapa_general(
         df, fuentes_activas=list(FUENTE_COLOR_ICONO.keys()), punto_resaltado=resaltado_mapa,
         key=clave_mapa, altura=640, df_tiendas=df_tiendas,
+        radio_cerca_m=300 if resaltado_mapa is not None else None,
+        centro=(resaltado_mapa[0], resaltado_mapa[1], 17) if resaltado_mapa is not None else None,
     )
     st.caption(
         "Pasa el mouse sobre un pin o una tienda para ver su información "

@@ -466,7 +466,7 @@ function tileUrl(b,z,x,y){
   return u;
 }
 /* ---------- fondo vectorial claro (el mismo estilo claro de CARTO de antes) ---------- */
-var VEC = { map:null, ready:false, cargando:false, visible:false };
+var VEC = { map:null, ready:false, cargando:false, visible:false, fallo:false, t0:Date.now() };
 var VEC_ESTILO = 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json';
 function crearVec(){
   if(VEC.map || !window.maplibregl) return;
@@ -476,14 +476,19 @@ function crearVec(){
     var listo=function(){ if(!VEC.ready){ VEC.ready=true; refresh(); } };
     VEC.map.on('load', listo);
     VEC.map.on('idle', listo);
-  }catch(e){ VEC.map=null; }
+    VEC.map.on('error', function(e){ if(!VEC.ready && e && !e.sourceId){ VEC.fallo=true; refresh(); } });
+    var n=0, t=setInterval(function(){          // por si el aviso 'load' no llega, se revisa el estado
+      n++; if(VEC.ready || n>100){ clearInterval(t); return; }
+      try{ if(VEC.map && VEC.map.loaded()) listo(); }catch(e){}
+    }, 400);
+  }catch(e){ VEC.map=null; VEC.fallo=true; }
 }
 function cargarVec(){
   if(VEC.cargando || VEC.map) return; VEC.cargando=true;
   var css=document.createElement('link'); css.rel='stylesheet';
   css.href='https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css'; document.head.appendChild(css);
   function intenta(urls){
-    if(!urls.length) return;
+    if(!urls.length){ VEC.fallo=true; refresh(); return; }
     var sc=document.createElement('script'); sc.src=urls[0];
     sc.onload=crearVec; sc.onerror=function(){ intenta(urls.slice(1)); };
     document.head.appendChild(sc);
@@ -501,9 +506,13 @@ function syncVec(){
   }
 }
 function vecActivo(){ return S.mode==='simple' && VEC.ready; }
+/* Mientras el mapa claro carga (unos segundos) no se muestra el mapa de respaldo,
+   para que el mapa no "cambie de cara" al buscar. Si no carga, entra el respaldo. */
+function vecEsperando(){ return S.mode==='simple' && !VEC.ready && !VEC.fallo && (Date.now()-VEC.t0)<4500; }
+setTimeout(function(){ refresh(); }, 4600);
 
 function capasBase(){
-  if(vecActivo()) return [];
+  if(vecActivo() || vecEsperando()) return [];
   /* Mapa simple: gris claro de Esri (como el mapa claro de antes) hasta el zoom 16;
      más cerca se usa OpenStreetMap en gris suave. Mapa detallado: OpenStreetMap a color. */
   if(S.mode==='simple'){
@@ -536,7 +545,7 @@ function renderTiles(cx,cy){
       }
     }
   });
-  $('attr').textContent = S.mode==='simple' ? (VEC.ready ? '© CARTO, © OpenStreetMap' : (view.z<=16.5 ? BASES.gris.attr : '© OpenStreetMap')) : BASES.osm.attr;
+  $('attr').textContent = S.mode==='simple' ? (VEC.ready ? '© CARTO, © OpenStreetMap' : (view.z<=16.5 ? BASES.gris.attr : '© OpenStreetMap')+' (mapa de respaldo)') : BASES.osm.attr;
   syncVec();
   Object.keys(tileCache).forEach(function(key){
     var t=tileCache[key];
