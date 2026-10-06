@@ -1184,6 +1184,200 @@ def detectar_coincidencias(
 
 
 # ---------------------------------------------------------------------------
+# Tiendas OXXO (abiertas / firmadas / cerradas) — hoja "Jun" de la base de
+# crecimiento. Solo se dibujan en el mapa del Módulo 1 (con sus propios íconos)
+# para ver de un vistazo qué tiendas ya existen cerca de un punto.
+# ---------------------------------------------------------------------------
+HOJA_TIENDAS_DEFECTO = "Jun"
+ESTADOS_TIENDA = ["Abierta", "Firmada", "Cerrada"]
+
+# Colombia aprox. — sirve para descartar coordenadas con error de digitación.
+_LAT_MIN, _LAT_MAX, _LON_MIN, _LON_MAX = -5.0, 14.0, -82.0, -66.0
+
+
+def estado_tienda_desde_texto(valor) -> str:
+    """
+    Convierte el texto de estado de una tienda (como venga escrito en el
+    Excel) a uno de: 'Abierta', 'Firmada', 'Cerrada' — o '' si no se
+    reconoce. 'Madura', 'En expansión', 'Operando', 'Activa'… cuentan como
+    abierta (ya está funcionando).
+    """
+    t = normalizar_texto(valor)
+    if not t or t == "nan":
+        return ""
+    if "firm" in t:
+        return "Firmada"
+    if any(x in t for x in ("cerr", "inactiv", "clausur", "liquid", "baja")):
+        return "Cerrada"
+    if any(x in t for x in ("abiert", "operand", "operacion", "madur", "expansi", "activ", "funcion")):
+        return "Abierta"
+    return ""
+
+
+def _a_numero_coordenada(serie: pd.Series) -> pd.Series:
+    texto = serie.astype(str).str.strip().str.replace(",", ".", regex=False)
+    return pd.to_numeric(texto, errors="coerce")
+
+
+def _buscar_encabezado_tiendas(crudo: pd.DataFrame, max_filas: int = 30) -> int:
+    """Fila (0, 1, 2…) donde parecen estar los títulos de las columnas."""
+    claves = ("latitud", "longitud", "lat", "lon", "estado", "estatus", "status", "tienda",
+              "nombre", "crm", "ciudad", "direccion", "coordenada", "apertura", "ubicacion")
+    mejor, mejor_fila = 0, 0
+    for i in range(min(max_filas, len(crudo))):
+        celdas = [normalizar_texto(x) for x in crudo.iloc[i].tolist()]
+        puntaje = sum(1 for c in celdas if c and any(k == c or k in c for k in claves))
+        if puntaje > mejor:
+            mejor, mejor_fila = puntaje, i
+    return mejor_fila
+
+
+def parsear_tiendas(crudo: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normaliza la hoja de tiendas (por ejemplo 'Jun') a las columnas:
+    nombre, estado_tienda, ciudad, direccion, detalle, latitud, longitud.
+    Es tolerante a nombres de columna distintos y a que los títulos no
+    estén en la primera fila. Deja información de diagnóstico en
+    `.attrs` (columnas encontradas, estados no reconocidos, etc.) para
+    mostrarla en la app si algo no calza.
+    """
+    salida_vacia = pd.DataFrame(columns=["nombre", "estado_tienda", "ciudad", "direccion", "detalle", "latitud", "longitud"])
+    if crudo is None or crudo.empty:
+        salida_vacia.attrs["diagnostico"] = {"error": "La hoja de tiendas está vacía."}
+        return salida_vacia
+
+    fila_enc = _buscar_encabezado_tiendas(crudo)
+    tabla = crudo.iloc[fila_enc + 1:].copy()
+    tabla.columns = [str(c).strip() if str(c).strip() not in ("", "nan") else f"col_{i}"
+                     for i, c in enumerate(crudo.iloc[fila_enc].tolist())]
+    tabla = tabla.dropna(how="all")
+    normal = {c: normalizar_texto(c) for c in tabla.columns}
+    diag = {"columnas": list(tabla.columns), "fila_encabezado": int(fila_enc) + 1}
+
+    def primera(*claves_exactas, contiene=()):
+        for c, n in normal.items():
+            if n in claves_exactas:
+                return c
+        for c, n in normal.items():
+            if any(k in n for k in contiene):
+                return c
+        return None
+
+    col_lat = primera("latitud", "lat", contiene=("latitud",))
+    col_lon = primera("longitud", "lon", "lng", "long", contiene=("longitud",))
+    col_coord = primera("coordenadas", "coordenada", contiene=("coordenada",))
+
+    if col_lat and col_lon:
+        lat = _a_numero_coordenada(tabla[col_lat])
+        lon = _a_numero_coordenada(tabla[col_lon])
+    elif col_coord:
+        pares = tabla[col_coord].apply(parsear_coordenada_pegada)
+        lat = pares.apply(lambda x: x[0] if x else float("nan"))
+        lon = pares.apply(lambda x: x[1] if x else float("nan"))
+    else:
+        diag["error"] = "No encontré columnas de latitud/longitud (ni de coordenadas)."
+        salida_vacia.attrs["diagnostico"] = diag
+        return salida_vacia
+    # Si vienen invertidas (lat con valores de longitud) o sin el signo menos.
+    invertidas = (lat.abs() > 20) & (lon.abs() <= 20)
+    lat, lon = lat.where(~invertidas, lon), lon.where(~invertidas, lat)
+    lon = lon.where(lon <= 0, -lon)
+
+    # Estado: entre las columnas candidatas, la que más valores reconocidos tenga.
+    candidatas = [c for c, n in normal.items() if any(k in n for k in ("estado", "estatus", "status", "situacion", "etapa"))]
+    if not candidatas:
+        candidatas = list(tabla.columns)
+    mejor_col, mejor_n = None, 0
+    for c in candidatas:
+        n_rec = int(tabla[c].apply(estado_tienda_desde_texto).ne("").sum())
+        if n_rec > mejor_n:
+            mejor_col, mejor_n = c, n_rec
+    diag["columna_estado"] = mejor_col
+    estado = (tabla[mejor_col].apply(estado_tienda_desde_texto) if mejor_col
+              else pd.Series([""] * len(tabla), index=tabla.index))
+    if mejor_col:
+        no_rec = tabla.loc[estado == "", mejor_col].astype(str).str.strip()
+        no_rec = no_rec[(no_rec != "") & (no_rec.str.lower() != "nan")]
+        diag["estados_no_reconocidos"] = no_rec.value_counts().head(15).to_dict()
+
+    col_nombre = primera("nombre tienda", "nombre de la tienda", "tienda", "nombre", "nombre pdv",
+                         "pdv", "sitio", "local", contiene=("nombre", "tienda"))
+    col_ciudad = primera("ciudad", "municipio", "plaza", "region", contiene=("ciudad", "municipio"))
+    col_dir = primera("direccion", "direccion tienda", contiene=("direccion",))
+    col_crm = primera("crm", "id", "codigo", "cod", "codigo tienda", contiene=("crm",))
+
+    def txt(col):
+        if col is None:
+            return pd.Series([""] * len(tabla), index=tabla.index)
+        return tabla[col].fillna("").astype(str).str.strip().replace("nan", "")
+
+    nombre = txt(col_nombre)
+    crm = txt(col_crm)
+    nombre = nombre.where(nombre != "", crm)
+    detalle = crm.where(crm == "", "CRM: " + crm)
+
+    resultado = pd.DataFrame({
+        "nombre": nombre, "estado_tienda": estado, "ciudad": txt(col_ciudad).apply(normalizar_ciudad),
+        "direccion": txt(col_dir), "detalle": detalle, "latitud": lat, "longitud": lon,
+    })
+    total = len(resultado)
+    en_colombia = resultado["latitud"].between(_LAT_MIN, _LAT_MAX) & resultado["longitud"].between(_LON_MIN, _LON_MAX)
+    diag["total_filas"] = total
+    diag["sin_coordenada_valida"] = int((~en_colombia).sum())
+    diag["sin_estado_reconocido"] = int(((estado == "") & en_colombia).sum())
+    resultado = resultado[en_colombia & (estado != "")].reset_index(drop=True)
+    diag["por_estado"] = resultado["estado_tienda"].value_counts().to_dict()
+    resultado.attrs["diagnostico"] = diag
+    return resultado
+
+
+def leer_tiendas_desde_url(url: str, hoja: str = HOJA_TIENDAS_DEFECTO, timeout: int = 60) -> pd.DataFrame:
+    """
+    Descarga el Excel de tiendas (link de OneDrive/SharePoint compartido
+    para 'cualquier persona con el vínculo') y lee la hoja indicada
+    (por defecto 'Jun'). Lanza ValueError con un mensaje claro si algo falla.
+    """
+    import requests
+
+    try:
+        resp = requests.get(convertir_link_compartido_a_descarga(url), timeout=timeout, allow_redirects=True)
+    except requests.exceptions.RequestException as e:
+        raise ValueError(f"No se pudo descargar el archivo de tiendas: {e}") from e
+    if resp.status_code != 200 or "html" in resp.headers.get("Content-Type", "").lower():
+        raise ValueError(
+            "El link de tiendas no devolvió un Excel (parece requerir inicio de sesión). "
+            "Debe compartirse con 'Cualquier persona con el vínculo'."
+        )
+    try:
+        excel = pd.ExcelFile(io.BytesIO(resp.content))
+    except Exception as e:
+        raise ValueError(f"El archivo de tiendas no se pudo leer como Excel: {e}") from e
+
+    clave = normalizar_texto(hoja)
+    nombre_hoja = next((h for h in excel.sheet_names if normalizar_texto(h) == clave), None)
+    if nombre_hoja is None:
+        nombre_hoja = next((h for h in excel.sheet_names if normalizar_texto(h).startswith(clave)), None)
+    if nombre_hoja is None:
+        raise ValueError(
+            f"No encontré la hoja '{hoja}' en el Excel de tiendas. Hojas que sí hay: "
+            + ", ".join(excel.sheet_names)
+        )
+    crudo = excel.parse(nombre_hoja, header=None, dtype=object)
+    resultado = parsear_tiendas(crudo)
+    resultado.attrs["hoja"] = nombre_hoja
+    return resultado
+
+
+def tiendas_cercanas(df_tiendas, lat: float, lon: float, radio_m: float = 300) -> pd.DataFrame:
+    """Tiendas OXXO (cualquier estado) a `radio_m` metros o menos de (lat, lon), de la más cercana a la más lejana."""
+    if df_tiendas is None or len(df_tiendas) == 0:
+        return pd.DataFrame(columns=["estado_tienda", "nombre", "ciudad", "direccion", "distancia_m"])
+    d = df_tiendas.copy()
+    d["distancia_m"] = [round(haversine_m(lat, lon, a, b), 1) for a, b in zip(d["latitud"], d["longitud"])]
+    return d[d["distancia_m"] <= radio_m].sort_values("distancia_m")
+
+
+# ---------------------------------------------------------------------------
 # Generadores (Survey123 / ArcGIS Online) — evitar duplicidad de generadores
 # ---------------------------------------------------------------------------
 # Capa pública de resultados de la encuesta de generadores (Survey123).
