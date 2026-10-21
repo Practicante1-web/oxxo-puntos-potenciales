@@ -564,8 +564,8 @@ def _parsear_operacion(crudo: pd.DataFrame) -> pd.DataFrame:
         .replace("", "Sin estado")
     )
     normalizado["estado_comite"] = razon_descarte
-    normalizado["latitud"] = pd.to_numeric(_col_por_nombres(crudo, ["Y"]), errors="coerce")
-    normalizado["longitud"] = pd.to_numeric(_col_por_nombres(crudo, ["X"]), errors="coerce")
+    _la, _lo = _coordenadas_tolerantes(crudo)
+    normalizado["latitud"], normalizado["longitud"] = _la, _lo
     normalizado["practicante"] = _col_por_nombres(crudo, ["Gestor asignado"]).fillna("").astype(str).str.strip()
     normalizado["tiendas_evaluadas"] = 0
     normalizado["detalle_microsaturacion"] = ""
@@ -579,6 +579,45 @@ def _parsear_operacion(crudo: pd.DataFrame) -> pd.DataFrame:
 def _parsear_localizadores(crudo: pd.DataFrame) -> pd.DataFrame:
     """Normaliza la hoja "Base localizadores" al esquema común (COLUMNAS)."""
     return _parsear_formato_seguimiento(crudo, FUENTE_LOCALIZADORES)
+
+
+_NOMBRES_PROYECTO = ["Proyecto", "Nombre del proyecto", "Nombre del punto", "Nombre punto", "Punto",
+                     "Nombre", "Local identificado", "Local", "Sitio", "Predio", "Inmueble"]
+
+
+def _reencabezar(crudo: pd.DataFrame, nombres_clave: list, max_filas: int = 15) -> pd.DataFrame:
+    """Si los títulos de columna no están en la primera fila (hay filas de título,
+    logos o celdas combinadas arriba), busca la fila que sí los tiene y la usa."""
+    claves = {normalizar_texto(n) for n in nombres_clave}
+    if any(normalizar_texto(c) in claves for c in crudo.columns):
+        return crudo
+    for i in range(min(max_filas, len(crudo))):
+        fila = [normalizar_texto(v) for v in crudo.iloc[i].tolist()]
+        if any(v in claves for v in fila):
+            nuevo = crudo.iloc[i + 1:].copy()
+            nuevo.columns = [str(v).strip() if str(v).strip() not in ("", "nan") else f"col_{j}"
+                             for j, v in enumerate(crudo.iloc[i].tolist())]
+            return nuevo.reset_index(drop=True)
+    return crudo
+
+
+def _coordenadas_tolerantes(crudo: pd.DataFrame):
+    """(latitud, longitud) de una hoja: usa 'Coordenadas' pegadas ('4.6, -74.0') o, si no
+    existe, columnas separadas (Latitud/Longitud, Y/X, Lat/Lon). Acepta coma decimal."""
+    coords = _col_por_nombres(crudo, ["Coordenadas", "Coordenada", "Ubicación", "Ubicacion",
+                                      "Coordenadas (lat, lon)", "Lat, Lon", "Latitud, Longitud"], None)
+    if coords is not None and not coords.isna().all():
+        lat_lon = coords.apply(parsear_coordenada_pegada)
+        lat = lat_lon.apply(lambda v: v[0] if v else None)
+        lon = lat_lon.apply(lambda v: v[1] if v else None)
+        if lat.notna().any():
+            return pd.to_numeric(lat, errors="coerce"), pd.to_numeric(lon, errors="coerce")
+    c_lat = _col_por_nombres(crudo, ["Latitud", "Lat", "Y", "Coordenada Y"], None)
+    c_lon = _col_por_nombres(crudo, ["Longitud", "Lon", "Lng", "X", "Coordenada X"], None)
+    if c_lat is not None and c_lon is not None:
+        return _a_numero_coordenada(c_lat), _a_numero_coordenada(c_lon)
+    vacio = pd.Series([float("nan")] * len(crudo), index=crudo.index)
+    return vacio, vacio
 
 
 def _parsear_formato_seguimiento(crudo: pd.DataFrame, fuente: str) -> pd.DataFrame:
@@ -596,15 +635,12 @@ def _parsear_formato_seguimiento(crudo: pd.DataFrame, fuente: str) -> pd.DataFra
     de "notas"/"comentarios" para que no se pierda esa información al
     consultar el punto.
     """
-    crudo = crudo.copy()
+    crudo = _reencabezar(crudo.copy(), _NOMBRES_PROYECTO)
     crudo.columns = [str(c).strip() for c in crudo.columns]
-    crudo = crudo[_col_por_nombres(crudo, ["Proyecto"]).notna()].reset_index(drop=True)
+    crudo = crudo[_col_por_nombres(crudo, _NOMBRES_PROYECTO).notna()].reset_index(drop=True)
     n = len(crudo)
 
-    coords = _col_por_nombres(crudo, ["Coordenadas"])
-    lat_lon = coords.apply(parsear_coordenada_pegada)
-    latitud = lat_lon.apply(lambda v: v[0] if v else None)
-    longitud = lat_lon.apply(lambda v: v[1] if v else None)
+    latitud, longitud = _coordenadas_tolerantes(crudo)
 
     localizador = _col_por_nombres(crudo, ["Localizador"]).fillna("").astype(str).str.strip()
     canal = _col_por_nombres(crudo, ["Canal"]).fillna("").astype(str).str.strip()
@@ -669,10 +705,10 @@ def _parsear_formato_seguimiento(crudo: pd.DataFrame, fuente: str) -> pd.DataFra
     normalizado["ciudad"] = _col_por_nombres(crudo, ["Ciudad"]).apply(normalizar_ciudad)
     normalizado["upz"] = _col_por_nombres(crudo, ["Plaza"]).fillna("").astype(str).str.strip()
     normalizado["local_identificado"] = (
-        _col_por_nombres(crudo, ["Proyecto"]).fillna("").astype(str).str.strip()
+        _col_por_nombres(crudo, _NOMBRES_PROYECTO).fillna("").astype(str).str.strip()
     )
     normalizado["fecha_registro"] = pd.to_datetime(
-        _col_por_nombres(crudo, ["Fecha recepción", "Fecha recepcion"]), errors="coerce"
+        _col_por_nombres(crudo, ["Fecha recepción", "Fecha recepcion", "Fecha de recepción", "Fecha"]), errors="coerce"
     ).dt.date
     normalizado["estado"] = (
         _col_por_nombres(crudo, ["Estatus"]).fillna("Sin estado").astype(str).str.strip()
@@ -719,12 +755,33 @@ def leer_fuentes_modulo1(ruta_o_buffer, nombre_archivo: str = "") -> pd.DataFram
         except Exception as e:
             errores.append(f"Especialistas (hoja '{hoja_esp}'): {e}")
 
-    hoja_ter = _buscar_hoja(excel, ["terceros"])
+    resumen = {}
+
+    def _anota(fuente, hoja, df_parte):
+        resumen[fuente] = {
+            "hoja": hoja, "filas": int(len(df_parte)),
+            "con_coordenadas": int(df_parte["latitud"].notna().sum()) if len(df_parte) else 0,
+        }
+
+    hoja_ter = _buscar_hoja(excel, ["terceros", "tercero", "3ros"])
     if hoja_ter:
         try:
-            partes.append(_parsear_terceros(excel.parse(sheet_name=hoja_ter)))
+            _p = _parsear_terceros(excel.parse(sheet_name=hoja_ter))
+            partes.append(_p); _anota(FUENTE_TERCEROS, hoja_ter, _p)
         except Exception as e:
             errores.append(f"Terceros (hoja '{hoja_ter}'): {e}")
+    else:
+        resumen[FUENTE_TERCEROS] = {"hoja": None, "filas": 0, "con_coordenadas": 0}
+
+    hoja_inm = _buscar_hoja(excel, ["inmobiliaria", "inmobiliarias", "inmob"])
+    if hoja_inm:
+        try:
+            _p = _parsear_formato_seguimiento(excel.parse(sheet_name=hoja_inm), FUENTE_INMOBILIARIA)
+            partes.append(_p); _anota(FUENTE_INMOBILIARIA, hoja_inm, _p)
+        except Exception as e:
+            errores.append(f"Inmobiliaria (hoja '{hoja_inm}'): {e}")
+    else:
+        resumen[FUENTE_INMOBILIARIA] = {"hoja": None, "filas": 0, "con_coordenadas": 0}
 
     hoja_ope = _buscar_hoja(excel, ["operacion", "operaciones", "visitas"])
     if hoja_ope:
@@ -757,6 +814,8 @@ def leer_fuentes_modulo1(ruta_o_buffer, nombre_archivo: str = "") -> pd.DataFram
     # aquí, en los `attrs` del DataFrame, para que la app lo pueda
     # mostrar como aviso.
     combinado.attrs["errores_fuentes"] = errores
+    combinado.attrs["resumen_fuentes"] = resumen
+    combinado.attrs["hojas_excel"] = list(excel.sheet_names)
     return combinado
 
 
@@ -1450,6 +1509,12 @@ def parsear_tiendas(crudo: pd.DataFrame) -> pd.DataFrame:
         ar = t_(c_arr, i)
         if ar and ar != "0":
             L.append(f"Arrendador: {ar}")
+        try:
+            la_i, lo_i = float(lat[i]), float(lon[i])
+            if round(la_i, 3) == la_i and round(lo_i, 3) == lo_i:
+                L.append("⚠️ Ubicación aproximada: la coordenada del Excel tiene pocos decimales (puede estar a ~100 m)")
+        except (TypeError, ValueError, KeyError):
+            pass
         fichas.append("\n".join(L))
         aperturas.append(txt_fecha[i])
 
