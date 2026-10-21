@@ -819,6 +819,23 @@ if _errores_fuentes:
         for _err in _errores_fuentes:
             st.warning(_err, icon="⚠️")
 
+_resumen_fuentes = getattr(df, "attrs", {}).get("resumen_fuentes") if df is not None else None
+if _resumen_fuentes:
+    _vacias = [f for f, r in _resumen_fuentes.items() if not r["filas"]]
+    _titulo = "📄 Hojas leídas del Excel" + (f" — ⚠️ sin datos: {', '.join(_vacias)}" if _vacias else "")
+    with st.expander(_titulo, expanded=bool(_vacias)):
+        _hojas = getattr(df, "attrs", {}).get("hojas_excel") or []
+        if _hojas:
+            st.caption("Hojas que tiene el Excel: " + ", ".join(f"«{h}»" for h in _hojas))
+        for _f, _r in _resumen_fuentes.items():
+            if _r["hoja"] is None:
+                st.write(f"• **{_f}**: no encontré ninguna hoja con ese nombre.")
+            else:
+                st.write(
+                    f"• **{_f}**: hoja «{_r['hoja']}» → {_r['filas']} punto(s) leído(s), "
+                    f"{_r['con_coordenadas']} con coordenadas."
+                )
+
 # Tiendas OXXO (hoja "Jun"): link propio en los Secrets (url_tiendas_oxxo) y,
 # si no existe, se intenta con la hoja "Jun" del mismo Excel de puntos. Si
 # falla, la app sigue igual, solo que sin tiendas en el mapa.
