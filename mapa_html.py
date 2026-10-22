@@ -228,6 +228,14 @@ _PLANTILLA = r"""<!DOCTYPE html>
   #tip .tt { font-weight:700; font-size:15.5px; margin-bottom:3px; }
   #tip .ap { margin-top:6px; padding-top:6px; border-top:1px dashed #D9D9DE; color:#B42318; font-weight:600; }
   #tip .pie { margin-top:6px; color:#8A8A90; font-size:12.5px; }
+  #map.regla { cursor:crosshair; }
+  #rsvg { position:absolute; left:0; top:0; width:100%; height:100%; z-index:3; pointer-events:none; overflow:hidden; }
+  #regla { position:absolute; left:10px; top:10px; z-index:25; display:none; background:#fff; border:1px solid #CFCFD6; border-radius:12px;
+    box-shadow:0 4px 16px rgba(0,0,0,.2); padding:9px 12px; font-size:13.5px; line-height:1.45; max-width:260px; }
+  #regla .tot { font-size:20px; font-weight:700; color:#1D4ED8; }
+  #regla .tr { color:#555; font-size:12.5px; margin-top:2px; }
+  #regla .ay { color:#555; }
+  #regla button { margin:7px 6px 0 0; border:1px solid #CFCFD6; background:#fff; border-radius:8px; padding:3px 9px; font-size:12.5px; cursor:pointer; color:#222; }
   #zoom { position:absolute; right:10px; top:10px; z-index:20; display:flex; flex-direction:column; gap:6px; }
   #zoom button { width:38px; height:38px; font-size:22px; line-height:1; background:#fff; border:1px solid #CFCFD6; border-radius:9px; cursor:pointer; color:#222; }
   #estado { position:absolute; left:10px; bottom:24px; z-index:20; background:rgba(255,255,255,.92); border-radius:8px;
@@ -238,7 +246,8 @@ _PLANTILLA = r"""<!DOCTYPE html>
 <div id="app">
   <div id="bar"></div>
   <div id="mapwrap">
-    <div id="map"><div id="vec"></div><div id="tiles"></div><div id="marks"></div></div>
+    <div id="map"><div id="vec"></div><div id="tiles"></div><div id="marks"></div><svg id="rsvg" xmlns="http://www.w3.org/2000/svg"></svg></div>
+    <div id="regla"></div>
     <div id="zoom"><button id="zin" title="Acercar">+</button><button id="zout" title="Alejar">&minus;</button></div>
     <div id="estado"></div>
     <div id="attr"></div>
@@ -294,6 +303,7 @@ function addMark(o){
     el.addEventListener('mouseleave',function(){ el.classList.remove('hov'); if(hoverMark===o) hoverMark=null; if(!pinned) hideTip(); });
     el.addEventListener('click',function(ev){
       if(moved>4) return; ev.stopPropagation();
+      if(R.on){ addPuntoRegla(o.a,o.o); return; }
       if(pinned===o){ pinned=null; hideTip(); } else { pinned=o; showTip(o,true); }
     });
   }
@@ -301,6 +311,7 @@ function addMark(o){
   return o;
 }
 var hoverMark=null, pinned=null, moved=0;
+var R = { on:false, pts:[] };      // regla para medir distancias
 
 var capaOn = {}, tiendaOn = {};
 
@@ -353,6 +364,10 @@ var chipSem=chip('<img src="'+D.semaforo+'" style="height:18px"> Semáforos', tr
 var chipTm=chip('<img src="'+D.tm+'" style="height:18px"> TransMilenio', true, function(b){
   S.tm=!S.tm; b.classList.toggle('off',!S.tm); refresh(); fetchExtra();
 }, 'solo-detalle');
+var chipRegla=chip('📏 Regla', false, function(b){
+  R.on=!R.on; b.classList.toggle('off',!R.on); mapEl.classList.toggle('regla',R.on);
+  if(R.on){ pinned=null; hideTip(); } panelRegla();
+});
 var chipBig=chip('Aa Letras grandes', false, function(b){ S.big=!S.big; b.classList.toggle('off',!S.big); refresh(); });
 
 /* Dos formas de ver el mapa: simple (limpio, poco saturado) y detallado (calles,
@@ -432,6 +447,53 @@ function fetchExtra(){
   }}
   if(nuevas) setEstado('Cargando semáforos y TransMilenio…'); else if(!sigQueue.length && !sigActive) setEstado('');
   sigPump();
+}
+
+/* ---------- regla para medir distancias (metros) ---------- */
+function distM(a1,o1,a2,o2){
+  var R0=6371008.8, f=Math.PI/180, dLa=(a2-a1)*f, dLo=(o2-o1)*f;
+  var h=Math.sin(dLa/2)*Math.sin(dLa/2)+Math.cos(a1*f)*Math.cos(a2*f)*Math.sin(dLo/2)*Math.sin(dLo/2);
+  return 2*R0*Math.asin(Math.min(1,Math.sqrt(h)));
+}
+function fmtM(d){ return String(Math.round(d)).replace(/\B(?=(\d{3})+(?!\d))/g,'.')+' m'; }
+function addPuntoRegla(a,o){ R.pts.push({a:a,o:o}); panelRegla(); refresh(); }
+var reglaEl=$('regla'), rsvg=$('rsvg');
+function panelRegla(){
+  if(!R.on && !R.pts.length){ reglaEl.style.display='none'; return; }
+  var tot=0, tr=[];
+  for(var i=1;i<R.pts.length;i++){ var d=distM(R.pts[i-1].a,R.pts[i-1].o,R.pts[i].a,R.pts[i].o); tot+=d; tr.push(fmtM(d)); }
+  var h='<div><b>📏 Regla</b></div>';
+  if(R.pts.length<2) h+='<div class="ay">'+(R.on?(R.pts.length?'Haz clic en el siguiente punto.':'Haz clic en el mapa o sobre una tienda / pin para empezar.'):'Activa «📏 Regla» para seguir midiendo.')+'</div>';
+  else { h+='<div class="tot">'+fmtM(tot)+'</div>'; if(tr.length>1) h+='<div class="tr">Tramos: '+tr.join(' · ')+'</div>'; }
+  h+='<button type="button" id="rUndo">↶ Quitar último</button><button type="button" id="rClear">🗑 Borrar</button>';
+  reglaEl.innerHTML=h; reglaEl.style.display='block';
+  var u=$('rUndo'), c=$('rClear');
+  if(u) u.addEventListener('click',function(){ R.pts.pop(); panelRegla(); refresh(); });
+  if(c) c.addEventListener('click',function(){ R.pts=[]; panelRegla(); refresh(); });
+}
+function svgEl(n,at){ var e=document.createElementNS('http://www.w3.org/2000/svg',n); for(var k in at) e.setAttribute(k,at[k]); return e; }
+function drawRegla(cx,cy){
+  while(rsvg.firstChild) rsvg.removeChild(rsvg.firstChild);
+  if(!R.pts.length) return;
+  var xy=R.pts.map(function(q){ var p=proj(q.a,q.o,view.z); return [W/2+p[0]-cx, H/2+p[1]-cy]; });
+  var pts=xy.map(function(v){return v[0].toFixed(1)+','+v[1].toFixed(1);}).join(' ');
+  if(xy.length>1){
+    rsvg.appendChild(svgEl('polyline',{points:pts,fill:'none',stroke:'#fff','stroke-width':7,'stroke-linecap':'round','stroke-linejoin':'round'}));
+    rsvg.appendChild(svgEl('polyline',{points:pts,fill:'none',stroke:'#1D4ED8','stroke-width':3.5,'stroke-linecap':'round','stroke-linejoin':'round','stroke-dasharray':'9 6'}));
+  }
+  var cum=0;
+  for(var i=0;i<xy.length;i++){
+    if(i>0){
+      var d=distM(R.pts[i-1].a,R.pts[i-1].o,R.pts[i].a,R.pts[i].o); cum+=d;
+      var dx=xy[i][0]-xy[i-1][0], dy=xy[i][1]-xy[i-1][1];
+      if(Math.hypot(dx,dy)>46 || xy.length===2){
+        var mx=(xy[i][0]+xy[i-1][0])/2, my=(xy[i][1]+xy[i-1][1])/2, t=fmtM(d), w=t.length*7.4+14;
+        rsvg.appendChild(svgEl('rect',{x:mx-w/2,y:my-11,width:w,height:22,rx:6,fill:'#1D4ED8',stroke:'#fff','stroke-width':1.5}));
+        var tx=svgEl('text',{x:mx,y:my+4.5,'text-anchor':'middle','font-size':'13','font-weight':'700',fill:'#fff','font-family':'Segoe UI,Arial,sans-serif'}); tx.textContent=t; rsvg.appendChild(tx);
+      }
+    }
+    rsvg.appendChild(svgEl('circle',{cx:xy[i][0],cy:xy[i][1],r:6,fill:i===0?'#1D4ED8':'#fff',stroke:'#1D4ED8','stroke-width':3}));
+  }
 }
 
 /* ---------- tarjeta de información ---------- */
@@ -608,6 +670,7 @@ function render(){
     m.el.style.display='block';
     m.el.style.transform='translate('+x+'px,'+y+'px)';
   });
+  drawRegla(cx,cy);
   var act=pinned||hoverMark; if(act && act.vis && tip.style.display==='block'){ tip.innerHTML=tipHtml(act,pinned===act); placeTip(act); }
 }
 var raf=0;
@@ -626,7 +689,12 @@ window.addEventListener('pointermove',function(e){
     var c=proj(drag.lat,drag.lon,view.z), g=unproj(c[0]-dx,c[1]-dy,view.z); view.lat=g[0]; view.lon=g[1]; refresh(); }
 });
 window.addEventListener('pointerup',function(){ if(drag){ drag=null; mapEl.classList.remove('drag'); fetchExtra(); } });
-mapEl.addEventListener('click',function(){ if(moved>4) return; if(pinned){ pinned=null; hideTip(); } });
+mapEl.addEventListener('click',function(e){
+  if(moved>4) return;
+  if(R.on){ var r=wrap.getBoundingClientRect(), c=proj(view.lat,view.lon,view.z);
+    var g=unproj(c[0]+(e.clientX-r.left-W/2), c[1]+(e.clientY-r.top-H/2), view.z); addPuntoRegla(g[0],g[1]); return; }
+  if(pinned){ pinned=null; hideTip(); }
+});
 function zoomAt(px,py,nz){
   nz=clamp(nz,MIN_Z,MAX_Z); var c=proj(view.lat,view.lon,view.z);
   var g=unproj(c[0]+(px-W/2), c[1]+(py-H/2), view.z);
@@ -639,7 +707,7 @@ mapEl.addEventListener('wheel',function(e){
   zoomAt(e.clientX-r.left,e.clientY-r.top, view.z + clamp(-e.deltaY*0.0016,-0.6,0.6));
   clearTimeout(wheelT); wheelT=setTimeout(fetchExtra,350);
 },{passive:false});
-mapEl.addEventListener('dblclick',function(e){ var r=wrap.getBoundingClientRect(); zoomAt(e.clientX-r.left,e.clientY-r.top,view.z+1); fetchExtra(); });
+mapEl.addEventListener('dblclick',function(e){ if(R.on) return; var r=wrap.getBoundingClientRect(); zoomAt(e.clientX-r.left,e.clientY-r.top,view.z+1); fetchExtra(); });
 $('zin').addEventListener('click',function(){ zoomAt(W/2,H/2,view.z+1); fetchExtra(); });
 $('zout').addEventListener('click',function(){ zoomAt(W/2,H/2,view.z-1); fetchExtra(); });
 window.addEventListener('resize',refresh);
