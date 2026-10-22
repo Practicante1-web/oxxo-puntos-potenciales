@@ -1084,7 +1084,7 @@ if modulo_activo.startswith("🔁"):
     )
 
     def _limpiar_busqueda_mapa():
-        for _k in ("resultado_busqueda_nombre", "resultado_busqueda_punto", "error_busqueda_punto"):
+        for _k in ("resultado_busqueda_nombre", "resultado_busqueda_punto", "error_busqueda_punto", "sel_nombre_mapa_unico"):
             st.session_state.pop(_k, None)
 
     modo_busqueda = st.radio(
@@ -1097,54 +1097,77 @@ if modulo_activo.startswith("🔁"):
     consulta_punto = None  # se llena si hay un punto válido para mostrar en rojo
     id_punto_buscado = None  # para no contar el propio punto como "cercano"
 
-    if modo_busqueda == "Por nombre":
-        col_texto, col_boton = st.columns([5, 1], vertical_alignment="bottom")
-        nombre_busqueda = col_texto.text_input(
-            "Nombre del punto", key="busqueda_nombre_mapa_unico",
-            placeholder="Ej. Toberin 168",
-        )
-        if col_boton.button("🔍 Buscar", type="primary", key="buscar_nombre_mapa_unico", use_container_width=True):
-            st.session_state["resultado_busqueda_nombre"] = buscar_por_nombre(df, nombre_busqueda)
+    tienda_buscada = None  # (nombre, lat, lon) si lo elegido es una tienda OXXO existente
 
-        resultado_nombre = st.session_state.get("resultado_busqueda_nombre")
-        if resultado_nombre is not None:
-            con_coords_nombre = resultado_nombre.dropna(subset=["latitud", "longitud"])
-            if resultado_nombre.empty:
-                st.info(
-                    "No hay ningún punto registrado con ese nombre (ni uno "
-                    "parecido). Si tienes su coordenada, búscalo 'Por coordenada'."
-                )
+    if modo_busqueda == "Por nombre":
+        # Lista de TODO lo que ya existe (tiendas OXXO y puntos potenciales): se escribe
+        # una parte del nombre (ej. "parque") y se despliegan los que lo contienen.
+        catalogo = {}
+        if df_tiendas is not None and len(df_tiendas):
+            for _t in df_tiendas.itertuples():
+                _et = f"{_t.nombre} · 🏪 Tienda {str(_t.estado_tienda).lower()}"
+                if str(getattr(_t, "ciudad", "") or "").strip():
+                    _et += f" · {_t.ciudad}"
+                if str(getattr(_t, "cr", "") or "").strip():
+                    _et += f" · CR {_t.cr}"
+                catalogo[_et] = {"tipo": "tienda", "fila": _t}
+        if df is not None and len(df):
+            for _p in df.itertuples():
+                if not str(_p.local_identificado).strip():
+                    continue
+                _et = f"{_p.local_identificado} · 📍 {_p.fuente}"
+                if str(getattr(_p, "ciudad", "") or "").strip():
+                    _et += f" · {_p.ciudad}"
+                if _et in catalogo:
+                    _et += f" (#{_p.id})"
+                catalogo[_et] = {"tipo": "punto", "fila": _p}
+        etiquetas = sorted(catalogo.keys(), key=lambda x: x.lower())
+
+        elegido = st.selectbox(
+            f"Nombre del punto o tienda ({len(etiquetas)} registrados)",
+            etiquetas, index=None, key="sel_nombre_mapa_unico",
+            placeholder="Escribe una parte del nombre, ej. parque, y elige de la lista",
+        )
+        st.caption(
+            "🏪 = tienda OXXO ya existente (abierta, firmada o cerrada) · 📍 = punto potencial "
+            "(de cualquier fuente). Escribe, por ejemplo, «parque» y salen todos los que lo contienen."
+        )
+        if elegido is not None:
+            _item = catalogo[elegido]
+            _f = _item["fila"]
+            if _item["tipo"] == "tienda":
+                try:
+                    _lat, _lon = float(_f.latitud), float(_f.longitud)
+                except (TypeError, ValueError):
+                    _lat = _lon = None
+                _lineas = [x for x in str(getattr(_f, "detalle", "") or "").split("\n") if x.strip()]
+                if not any(x.startswith("Estado") for x in _lineas):
+                    _lineas.insert(0, f"Estado de la tienda: {_f.estado_tienda}")
+                if _lat is not None:
+                    tienda_buscada = (str(_f.nombre), _lat, _lon)
+                    consulta_punto = {
+                        "lat": _lat, "lon": _lon, "etiqueta": str(_f.nombre),
+                        "info_extra": "\n".join(_lineas),
+                    }
             else:
-                st.caption(f"Se encontraron {len(resultado_nombre)} punto(s) con nombre igual o muy parecido.")
-                if con_coords_nombre.empty:
+                _lat, _lon = _f.latitud, _f.longitud
+                if pd.isna(_lat) or pd.isna(_lon):
                     st.warning(
-                        "Ninguno de esos puntos tiene coordenadas registradas, "
-                        "así que no se puede mostrar en el mapa."
+                        "Ese punto no tiene coordenadas registradas, así que no se puede "
+                        "mostrar en el mapa."
                     )
                 else:
-                    opciones_nombre = {
-                        f"{row.local_identificado} · {row.fuente}": row.id
-                        for row in con_coords_nombre.itertuples()
-                    }
-                    if len(opciones_nombre) > 1:
-                        etiqueta_elegida = st.selectbox(
-                            "Hay varios con ese nombre — elige cuál ver en el mapa",
-                            list(opciones_nombre.keys()),
-                            key="preview_resultado_nombre_mapa_unico",
-                        )
-                    else:
-                        etiqueta_elegida = next(iter(opciones_nombre))
-                    id_punto_buscado = opciones_nombre[etiqueta_elegida]
-                    fila_elegida = con_coords_nombre[con_coords_nombre["id"] == id_punto_buscado].iloc[0]
+                    id_punto_buscado = _f.id
+                    def _v(x):
+                        return "—" if (x is None or pd.isna(x) or str(x).strip() == "") else str(x)
                     consulta_punto = {
-                        "lat": float(fila_elegida["latitud"]), "lon": float(fila_elegida["longitud"]),
-                        "etiqueta": str(fila_elegida["local_identificado"]),
+                        "lat": float(_lat), "lon": float(_lon), "etiqueta": str(_f.local_identificado),
                         "info_extra": (
-                            f"Fuente: {fila_elegida.get('fuente', '') or '—'}"
-                            f"\nResponsable: {fila_elegida.get('especialista', '') or '—'}"
-                            f"\nEstado: {fila_elegida.get('estado', '') or '—'}"
-                            f"\nFecha de registro: {fila_elegida.get('fecha_registro', '') or '—'}"
-                            f"\nCiudad: {fila_elegida.get('ciudad', '') or '—'}"
+                            f"Fuente: {_v(_f.fuente)}"
+                            f"\nResponsable: {_v(_f.especialista)}"
+                            f"\nEstado: {_v(_f.estado)}"
+                            f"\nFecha de registro: {_v(_f.fecha_registro)}"
+                            f"\nCiudad: {_v(_f.ciudad)}"
                         ),
                     }
 
@@ -1249,6 +1272,10 @@ if modulo_activo.startswith("🔁"):
 
         if df_tiendas is not None and len(df_tiendas):
             tiendas_cerca = tiendas_cercanas(df_tiendas, lat_c, lon_c, 300)
+            if tienda_buscada is not None and len(tiendas_cerca):
+                tiendas_cerca = tiendas_cerca[
+                    ~((tiendas_cerca["nombre"] == tienda_buscada[0]) & (tiendas_cerca["distancia_m"] < 3))
+                ]
             if tiendas_cerca.empty:
                 st.caption("🏪 No hay tiendas OXXO (abiertas, firmadas ni cerradas) a menos de 300 m de este punto.")
             else:
