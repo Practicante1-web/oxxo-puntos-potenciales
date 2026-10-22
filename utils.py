@@ -816,6 +816,7 @@ def leer_fuentes_modulo1(ruta_o_buffer, nombre_archivo: str = "") -> pd.DataFram
     combinado.attrs["errores_fuentes"] = errores
     combinado.attrs["resumen_fuentes"] = resumen
     combinado.attrs["hojas_excel"] = list(excel.sheet_names)
+    combinado.attrs["hojas_usadas"] = [h for h in (hoja_esp, hoja_ter, hoja_ope, hoja_loc, hoja_inm) if h]
     return combinado
 
 
