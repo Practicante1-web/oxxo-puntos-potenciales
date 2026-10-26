@@ -1249,7 +1249,7 @@ def detectar_coincidencias(
 # para ver de un vistazo qué tiendas ya existen cerca de un punto.
 # ---------------------------------------------------------------------------
 HOJA_TIENDAS_DEFECTO = "Jun"
-ESTADOS_TIENDA = ["Abierta", "Firmada", "Cerrada"]
+ESTADOS_TIENDA = ["Abierta", "Expansión", "Firmada", "Obra", "Cerrada"]
 
 # Colombia aprox. — sirve para descartar coordenadas con error de digitación.
 _LAT_MIN, _LAT_MAX, _LON_MIN, _LON_MAX = -5.0, 14.0, -82.0, -66.0
@@ -1258,18 +1258,23 @@ _LAT_MIN, _LAT_MAX, _LON_MIN, _LON_MAX = -5.0, 14.0, -82.0, -66.0
 def estado_tienda_desde_texto(valor) -> str:
     """
     Convierte el texto de estado de una tienda (como venga escrito en el
-    Excel) a uno de: 'Abierta', 'Firmada', 'Cerrada' — o '' si no se
-    reconoce. 'Madura', 'En expansión', 'Operando', 'Activa'… cuentan como
-    abierta (ya está funcionando).
+    Excel) a uno de: 'Abierta', 'Expansión', 'Firmada', 'Obra', 'Cerrada' —
+    o '' si no se reconoce. 'Madura', 'Operando', 'Activa'… cuentan como
+    abierta (ya está funcionando). 'OBRA' es su propio estado (ya firmada y
+    en construcción, todavía no abre).
     """
     t = normalizar_texto(valor)
     if not t or t == "nan":
         return ""
-    if "firm" in t or t == "obra" or t.startswith("en obra"):
-        return "Firmada"          # firmada o ya en obra (todavía no abre)
+    if t == "obra" or t.startswith("en obra") or "construc" in t:
+        return "Obra"             # ya firmada, en construcción (todavía no abre)
+    if "firm" in t:
+        return "Firmada"
     if any(x in t for x in ("cerr", "inactiv", "clausur", "liquid", "baja")):
         return "Cerrada"
-    if any(x in t for x in ("abiert", "operand", "operacion", "madur", "expansi", "activ", "funcion")):
+    if "expansi" in t:
+        return "Expansión"
+    if any(x in t for x in ("abiert", "operand", "operacion", "madur", "activ", "funcion")):
         return "Abierta"
     return ""
 
@@ -1518,6 +1523,17 @@ def parsear_tiendas(crudo: pd.DataFrame) -> pd.DataFrame:
             pass
         fichas.append("\n".join(L))
         aperturas.append(txt_fecha[i])
+
+    # Tienda abierta cuyo "Tipo de tienda" es EXP 2025 o EXP 2026…
+    # = tienda en expansión (se dibuja en azul oscuro). Las firmadas, en obra y
+    # cerradas conservan su propio estado aunque sean de expansión.
+    if c_tie is not None:
+        _tipo = tabla[c_tie].astype(str).str.strip().str.upper()
+        # solo cuentan EXP 2025 y EXP 2026 (las EXP 2024 y cualquier tienda
+        # cerrada de expansión se quedan con su propio estado).
+        _es_exp = _tipo.str.match(r"^EXP\w*\s*-?\s*(2025|2026)\b")
+        estado = estado.where(~((estado == "Abierta") & _es_exp), "Expansión")
+        diag["expansion_por_tipo"] = int(((estado == "Expansión") & _es_exp).sum())
 
     resultado = pd.DataFrame({
         "nombre": nombre, "estado_tienda": estado, "cr": crm, "apertura": aperturas,
