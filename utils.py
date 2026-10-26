@@ -1319,6 +1319,62 @@ def _buscar_encabezado_tiendas(crudo: pd.DataFrame, max_filas: int = 30) -> int:
     return mejor_fila
 
 
+def _fechas_excel(serie: pd.Series) -> pd.Series:
+    """
+    Convierte una columna de fechas del Excel a fechas reales, venga como venga:
+    - fecha de verdad (datetime),
+    - número de serie de Excel (ej. 40514 = 02/12/2010; así llegan las fechas
+      cuando la celda solo tiene formato de fecha),
+    - texto «d/m/aaaa» (día primero, como en Colombia) o «aaaa-mm-dd».
+    Lo que no se entienda queda vacío (NaT), nunca 01/01/1970.
+    """
+    import re as _re
+    from datetime import datetime as _dt, timedelta as _td
+
+    origen = _dt(1899, 12, 30)
+
+    def una(v):
+        if v is None:
+            return pd.NaT
+        if isinstance(v, pd.Timestamp):
+            return v if v.year > 1990 else pd.NaT
+        if isinstance(v, _dt):
+            return pd.Timestamp(v) if v.year > 1990 else pd.NaT
+        t = str(v).strip().replace(",", ".")
+        if not t or t.lower() in ("nan", "nat", "none", "0", "0.0"):
+            return pd.NaT
+        try:
+            n = float(t)
+        except ValueError:
+            n = None
+        if n is not None:
+            # número de serie de Excel (20000 ≈ año 1954; 80000 ≈ año 2119)
+            if 20000 <= n <= 80000:
+                return pd.Timestamp(origen + _td(days=n))
+            return pd.NaT
+        m = _re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", t)
+        if m:
+            try:
+                return pd.Timestamp(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            except ValueError:
+                return pd.NaT
+        m = _re.match(r"^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})", t)
+        if m:
+            d, mes, a = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if a < 100:
+                a += 2000
+            try:
+                return pd.Timestamp(a, mes, d)
+            except ValueError:
+                try:                       # por si viene mes/día/año
+                    return pd.Timestamp(a, d, mes)
+                except ValueError:
+                    return pd.NaT
+        return pd.NaT
+
+    return pd.to_datetime(serie.map(una), errors="coerce")
+
+
 def parsear_tiendas(crudo: pd.DataFrame) -> pd.DataFrame:
     """
     Normaliza la hoja de tiendas (por ejemplo 'Jun') a las columnas:
@@ -1443,7 +1499,7 @@ def parsear_tiendas(crudo: pd.DataFrame) -> pd.DataFrame:
 
     txt_fecha = pd.Series([""] * len(tabla), index=tabla.index)
     if col_apertura is not None:
-        fechas = pd.to_datetime(tabla[col_apertura], errors="coerce", dayfirst=not tabla[col_apertura].astype(str).str.match(r"^\s*\d{4}-").any())
+        fechas = _fechas_excel(tabla[col_apertura])
         txt_fecha = fechas.dt.strftime("%d/%m/%Y").fillna("")
 
     def col(*nombres):
