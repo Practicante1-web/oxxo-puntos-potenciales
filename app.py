@@ -272,7 +272,7 @@ def renderizar_mapa_general(
     Dibuja el mapa combinado del Módulo 1 como una página de mapa propia
     (ver mapa_html.py): una capa por cada fuente (Especialistas=morado,
     Operación=azul, Terceros=rosado, Inmobiliaria=verde, Localizadores=
-    naranja) y, si se dan, las tiendas OXXO (abiertas, firmadas, cerradas).
+    naranja) y, si se dan, las tiendas OXXO (abiertas, en expansión, firmadas, en obra, cerradas).
 
     - punto_resaltado: un (lat, lon, etiqueta[, info]) o una lista de ellos;
       se dibujan en ROJO, encima de todo.
@@ -304,6 +304,11 @@ def renderizar_mapa_general(
         resaltados=resaltados, tiendas=df_tiendas, centro=centro, altura=altura,
     )
     components.html(html_mapa, height=altura + 4, scrolling=False)
+
+
+# Cómo se nombra cada estado de tienda en los textos de la app.
+_NOMBRE_ESTADO_TIENDA = {"Abierta": "abierta", "Expansión": "en expansión", "Firmada": "firmada", "Obra": "en obra", "Cerrada": "cerrada"}
+_PLURAL_ESTADO_TIENDA = {"Abierta": "abiertas", "Expansión": "en expansión", "Firmada": "firmadas", "Obra": "en obra", "Cerrada": "cerradas"}
 
 
 def mostrar_leyenda_fuentes(incluir_resaltado=False):
@@ -613,7 +618,7 @@ def _leer_fuentes_modulo1_desde_url_cacheado(url: str):
 
 @st.cache_data(show_spinner="Cargando las tiendas OXXO...", ttl=TTL_CACHE_DATOS)
 def _leer_tiendas_cacheado(url: str, hoja: str):
-    """Tiendas OXXO (abiertas / firmadas / cerradas) desde la hoja indicada del Excel de tiendas."""
+    """Tiendas OXXO (abiertas / en expansión / firmadas / en obra / cerradas) desde la hoja indicada del Excel de tiendas."""
     return leer_tiendas_desde_url(url, hoja)
 
 
@@ -711,7 +716,7 @@ if _resumen_fuentes:
         ]
         if _no_usadas:
             st.caption("Hojas que la app no usa (no son una fuente de puntos): " + ", ".join(f"«{h}»" for h in _no_usadas))
-        st.caption(f"La hoja «{HOJA_TIENDAS_DEFECTO}» se usa para las tiendas OXXO (abiertas, firmadas y cerradas).")
+        st.caption(f"La hoja «{HOJA_TIENDAS_DEFECTO}» se usa para las tiendas OXXO (abiertas, en expansión, firmadas, en obra y cerradas).")
         for _f, _r in _resumen_fuentes.items():
             if _r["hoja"] is None:
                 st.write(f"• **{_f}**: no encontré ninguna hoja con ese nombre.")
@@ -918,7 +923,7 @@ st.subheader("🗺️ Mapa y revisión de puntos")
 st.write(
     "Aquí están todos los puntos que llegan (**especialistas, "
     "localizadores, terceros, operación e inmobiliaria**) y las tiendas "
-    "OXXO (abiertas, firmadas y cerradas). Busca un punto por nombre o "
+    "OXXO (abiertas, en expansión, firmadas, en obra y cerradas). Busca un punto por nombre o "
     "por coordenada: aparece en **rojo** en el mapa y ves si hay algo "
     "cerca o si está libre para analizar."
 )
@@ -945,7 +950,7 @@ if modo_busqueda == "Por nombre":
     catalogo = {}
     if df_tiendas is not None and len(df_tiendas):
         for _t in df_tiendas.itertuples():
-            _et = f"{_t.nombre} · 🏪 Tienda {str(_t.estado_tienda).lower()}"
+            _et = f"{_t.nombre} · 🏪 Tienda {_NOMBRE_ESTADO_TIENDA.get(str(_t.estado_tienda), str(_t.estado_tienda).lower())}"
             if str(getattr(_t, "ciudad", "") or "").strip():
                 _et += f" · {_t.ciudad}"
             if str(getattr(_t, "cr", "") or "").strip():
@@ -969,7 +974,7 @@ if modo_busqueda == "Por nombre":
         placeholder="Escribe una parte del nombre, ej. parque, y elige de la lista",
     )
     st.caption(
-        "🏪 = tienda OXXO ya existente (abierta, firmada o cerrada) · 📍 = punto potencial "
+        "🏪 = tienda OXXO ya existente (abierta, en expansión, firmada, en obra o cerrada) · 📍 = punto potencial "
         "(de cualquier fuente). Escribe, por ejemplo, «parque» y salen todos los que lo contienen."
     )
     if elegido is not None:
@@ -1117,7 +1122,7 @@ else:
                 ~((tiendas_cerca["nombre"] == tienda_buscada[0]) & (tiendas_cerca["distancia_m"] < 3))
             ]
         if tiendas_cerca.empty:
-            st.caption("🏪 No hay tiendas OXXO (abiertas, firmadas ni cerradas) a menos de 300 m de este punto.")
+            st.caption("🏪 No hay tiendas OXXO (abiertas, en expansión, firmadas, en obra ni cerradas) a menos de 300 m de este punto.")
         else:
             st.markdown(f"**🏪 Tiendas OXXO a menos de 300 m ({len(tiendas_cerca)}):**")
             st.dataframe(
@@ -1162,14 +1167,14 @@ if error_tiendas:
 elif df_tiendas is None:
     st.caption(
         "🏪 Las tiendas OXXO todavía no están conectadas (falta el link de "
-        "la hoja con las tiendas abiertas, firmadas y cerradas)."
+        "la hoja con las tiendas abiertas, en expansión, firmadas, en obra y cerradas)."
     )
 else:
     _diag_t = getattr(df_tiendas, "attrs", {}).get("diagnostico", {})
     _por_estado = _diag_t.get("por_estado", {})
     with st.expander(
         f"🏪 Tiendas OXXO cargadas: {len(df_tiendas)} "
-        f"({', '.join(f'{v} {k.lower()}s' for k, v in _por_estado.items()) or 'ninguna'})"
+        f"({', '.join(f'{v} {_PLURAL_ESTADO_TIENDA.get(k, k.lower())}' for k, v in _por_estado.items()) or 'ninguna'})"
     ):
         if _diag_t.get("error"):
             st.error(_diag_t["error"])
@@ -1177,6 +1182,11 @@ else:
             f"Hoja leída: {df_tiendas.attrs.get('hoja', '—')} · columna de estado usada: "
             f"{_diag_t.get('columna_estado') or 'no encontré ninguna'}"
         )
+        if _diag_t.get("expansion_por_tipo"):
+            st.caption(
+                f"{_diag_t['expansion_por_tipo']} tienda(s) abierta(s) se dibujan como «en expansión» "
+                "(azul oscuro) porque su Tipo de tienda dice EXP 2025 o EXP 2026."
+            )
         if _diag_t.get("sin_coordenada_valida"):
             st.caption(f"{_diag_t['sin_coordenada_valida']} fila(s) sin coordenada válida, no se dibujan.")
         if _diag_t.get("sin_estado_reconocido"):
