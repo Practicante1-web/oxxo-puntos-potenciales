@@ -366,6 +366,16 @@ st.markdown(
         font-weight: 700 !important;
     }}
 
+    /* Opciones de los selectores (radio) más grandes y en negrilla, para que se lean fácil */
+    div[data-testid="stRadio"] > label p {{
+        font-size: 1.1rem !important;
+        font-weight: 700 !important;
+    }}
+    div[data-testid="stRadio"] div[role="radiogroup"] label p {{
+        font-size: 1.05rem !important;
+        font-weight: 700 !important;
+    }}
+
     /* Botones primarios (type="primary") en rojo OXXO */
     button[kind="primary"], button[kind="primaryFormSubmit"] {{
         background-color: {OXXO_ROJO} !important;
@@ -781,9 +791,9 @@ with st.sidebar:
     st.markdown("**Inteligencia de Expansión**")
     st.caption("Consulta y seguimiento de puntos potenciales")
     st.write(
-        "Antes de registrar un punto potencial nuevo, "
-        "revisa aquí si ya existe algo parecido cerca — así se evita "
-        "trabajo duplicado en campo y en Survey123."
+        "Antes de visitar o analizar un punto potencial, revisa aquí si ya "
+        "fue reportado por otra fuente o si hay una tienda OXXO cerca. "
+        "Así se evitan visitas repetidas y se decide con mejor información."
     )
     st.divider()
     st.markdown("**🔄 Actualizar datos**")
@@ -880,11 +890,16 @@ tab_mapa, tab_resumen, tab_dup = st.tabs([
 with tab_mapa:
     st.subheader("🗺️ Mapa y revisión de puntos")
     st.write(
-        "Aquí están todos los puntos que llegan (**especialistas, "
-        "localizadores, terceros, operación e inmobiliaria**) y las tiendas "
-        "OXXO (abiertas, en expansión, firmadas, en obra y cerradas). Busca un punto por nombre o "
-        "por coordenada: aparece en **rojo** en el mapa y ves si hay algo "
-        "cerca o si está libre para analizar."
+        "Aquí se revisa un punto antes de visitarlo: si **ya fue reportado** por "
+        "otra fuente y si hay **tiendas OXXO cerca**."
+    )
+    st.markdown(
+        "1. **Busca el punto** por nombre o por coordenada.\n"
+        "2. **Mira el mapa:** el punto buscado aparece en **rojo**, junto a los puntos "
+        "potenciales (Especialistas, Localizadores, Terceros, Operación e Inmobiliarias) y a "
+        "las tiendas OXXO (abiertas, en expansión, firmadas, en obra y cerradas) que tiene alrededor.\n"
+        "3. **Lee el resultado** más abajo (después de Google Maps y Street View): el punto está **libre para análisis** "
+        "o tiene **posibles coincidencias** cerca."
     )
 
     def _limpiar_busqueda_mapa():
@@ -1027,7 +1042,7 @@ with tab_mapa:
     if resaltado_mapa is not None:
         _vista = st.radio(
             "¿Qué quieres ver en el mapa?",
-            ["📍 Solo lo cercano (a menos de 300 m)", "🗺️ Todo (con la búsqueda marcada en rojo)"],
+            ["📍 Solo lo cercano al punto (a menos de 300 m)", "🗺️ Todo el mapa (con el punto buscado en rojo)"],
             horizontal=True, key="vista_mapa_busqueda",
         )
         solo_cerca = _vista.startswith("📍")
