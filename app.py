@@ -863,446 +863,468 @@ if sin_coords:
 # Resumen general — total de puntos potenciales + una gráfica pequeña
 # por cada fuente (para que no salga una sola gráfica gigante). Este
 # resumen vive SOLO en Módulo 1.
-st.markdown("#### Resumen general de puntos potenciales")
-st.metric("Total de puntos potenciales (todas las fuentes)", len(df))
-resumen_fuente = (
-    df["fuente"].replace("", "Sin fuente").value_counts()
-    .rename_axis("Fuente").reset_index(name="Cantidad")
-)
-st.dataframe(resumen_fuente, hide_index=True, use_container_width=True)
+# ---------------------------------------------------------------------------
+# Tres hojas (pestañas) para tener la información ordenada:
+#   1) Mapa y revisión de puntos  2) Resumen general  3) Duplicados
+# ---------------------------------------------------------------------------
+tab_mapa, tab_resumen, tab_dup = st.tabs([
+    "🗺️ Mapa y revisión de puntos",
+    "📊 Resumen general",
+    "⚠️ Duplicados",
+])
 
-st.markdown("**Puntos registrados por responsable, en cada fuente**")
-cols_resumen_fuente = st.columns(2)
-for i_fuente, (fuente_resumen, color_resumen) in enumerate(FUENTE_COLOR_ICONO.items()):
-    with cols_resumen_fuente[i_fuente % 2]:
-        sub_fuente = df[
-            (df["fuente"] == fuente_resumen) & (df["especialista"].astype(str).str.strip() != "")
-        ]
-        conteo_fuente = (
-            sub_fuente.groupby("especialista").size().reset_index(name="cantidad")
-            .sort_values("cantidad", ascending=False)
+# ===== HOJA 1 · Mapa y revisión de puntos ==================================
+# Orden: búsqueda (nombre / coordenada) → mapa con la búsqueda y tiendas cerca →
+# Google Maps y Street View → resultado (posibles coincidencias o libre) →
+# tiendas OXXO cercanas al punto.
+with tab_mapa:
+    st.subheader("🗺️ Mapa y revisión de puntos")
+    st.write(
+        "Aquí están todos los puntos que llegan (**especialistas, "
+        "localizadores, terceros, operación e inmobiliaria**) y las tiendas "
+        "OXXO (abiertas, en expansión, firmadas, en obra y cerradas). Busca un punto por nombre o "
+        "por coordenada: aparece en **rojo** en el mapa y ves si hay algo "
+        "cerca o si está libre para analizar."
+    )
+
+    def _limpiar_busqueda_mapa():
+        for _k in ("resultado_busqueda_nombre", "resultado_busqueda_punto", "error_busqueda_punto", "sel_nombre_mapa_unico"):
+            st.session_state.pop(_k, None)
+
+    modo_busqueda = st.radio(
+        "¿Cómo quieres buscar?",
+        ["Por nombre", "Por coordenada"],
+        horizontal=True,
+        key="modo_busqueda_mapa_unico",
+    )
+
+    consulta_punto = None  # se llena si hay un punto válido para mostrar en rojo
+    id_punto_buscado = None  # para no contar el propio punto como "cercano"
+
+    tienda_buscada = None  # (nombre, lat, lon) si lo elegido es una tienda OXXO existente
+
+    if modo_busqueda == "Por nombre":
+        # Lista de TODO lo que ya existe (tiendas OXXO y puntos potenciales): se escribe
+        # una parte del nombre (ej. "parque") y se despliegan los que lo contienen.
+        catalogo = {}
+        if df_tiendas is not None and len(df_tiendas):
+            for _t in df_tiendas.itertuples():
+                _et = f"{_t.nombre} · 🏪 Tienda {_NOMBRE_ESTADO_TIENDA.get(str(_t.estado_tienda), str(_t.estado_tienda).lower())}"
+                if str(getattr(_t, "ciudad", "") or "").strip():
+                    _et += f" · {_t.ciudad}"
+                if str(getattr(_t, "cr", "") or "").strip():
+                    _et += f" · CR {_t.cr}"
+                catalogo[_et] = {"tipo": "tienda", "fila": _t}
+        if df is not None and len(df):
+            for _p in df.itertuples():
+                if not str(_p.local_identificado).strip():
+                    continue
+                _et = f"{_p.local_identificado} · 📍 {_p.fuente}"
+                if str(getattr(_p, "ciudad", "") or "").strip():
+                    _et += f" · {_p.ciudad}"
+                if _et in catalogo:
+                    _et += f" (#{_p.id})"
+                catalogo[_et] = {"tipo": "punto", "fila": _p}
+        etiquetas = sorted(catalogo.keys(), key=lambda x: x.lower())
+
+        elegido = st.selectbox(
+            f"Nombre del punto o tienda ({len(etiquetas)} registrados)",
+            etiquetas, index=None, key="sel_nombre_mapa_unico",
+            placeholder="Escribe una parte del nombre, ej. parque, y elige de la lista",
         )
-
-        st.markdown(f"*{fuente_resumen}*")
-        if conteo_fuente.empty:
-            st.caption("Todavía no hay datos para graficar.")
-        else:
-            # Se muestran solo los 5 con más puntos, para que la
-            # gráfica quede compacta — si tiene más, usa el ícono de
-            # pantalla completa que trae la gráfica (arriba a la
-            # derecha, al pasar el mouse) para verla más grande y sin
-            # que los nombres queden cortados.
-            top5_fuente = conteo_fuente.head(5)
-            # Altura mínima generosa (y bastante espacio por barra) para
-            # que con pocas categorías (1 o 2) las barras y sus nombres
-            # no queden amontonados/superpuestos — con "cantidad" como
-            # entero se fuerzan los ticks del eje X a números enteros.
-            chart_fuente = (
-                alt.Chart(top5_fuente)
-                .mark_bar(color=_COLORES_HEX_LEYENDA.get(color_resumen, OXXO_ROJO), cornerRadiusEnd=4)
-                .encode(
-                    x=alt.X("cantidad:Q", title="Puntos", axis=alt.Axis(tickMinStep=1)),
-                    y=alt.Y(
-                        "especialista:N", title=None, sort="-x",
-                        axis=alt.Axis(labelLimit=160),
-                        scale=alt.Scale(paddingInner=0.35, paddingOuter=0.3),
-                    ),
-                    tooltip=[
-                        alt.Tooltip("especialista:N", title="Especialista / responsable"),
-                        alt.Tooltip("cantidad:Q", title="Puntos"),
-                    ],
-                )
-                .properties(height=max(120, 42 * len(top5_fuente)))
-            )
-            st.altair_chart(chart_fuente, use_container_width=True)
-            if len(conteo_fuente) > 5:
-                st.caption(f"Mostrando los 5 con más puntos, de {len(conteo_fuente)} responsables.")
-
-st.divider()
-st.subheader("🗺️ Mapa y revisión de puntos")
-st.write(
-    "Aquí están todos los puntos que llegan (**especialistas, "
-    "localizadores, terceros, operación e inmobiliaria**) y las tiendas "
-    "OXXO (abiertas, en expansión, firmadas, en obra y cerradas). Busca un punto por nombre o "
-    "por coordenada: aparece en **rojo** en el mapa y ves si hay algo "
-    "cerca o si está libre para analizar."
-)
-
-def _limpiar_busqueda_mapa():
-    for _k in ("resultado_busqueda_nombre", "resultado_busqueda_punto", "error_busqueda_punto", "sel_nombre_mapa_unico"):
-        st.session_state.pop(_k, None)
-
-modo_busqueda = st.radio(
-    "¿Cómo quieres buscar?",
-    ["Por nombre", "Por coordenada"],
-    horizontal=True,
-    key="modo_busqueda_mapa_unico",
-)
-
-consulta_punto = None  # se llena si hay un punto válido para mostrar en rojo
-id_punto_buscado = None  # para no contar el propio punto como "cercano"
-
-tienda_buscada = None  # (nombre, lat, lon) si lo elegido es una tienda OXXO existente
-
-if modo_busqueda == "Por nombre":
-    # Lista de TODO lo que ya existe (tiendas OXXO y puntos potenciales): se escribe
-    # una parte del nombre (ej. "parque") y se despliegan los que lo contienen.
-    catalogo = {}
-    if df_tiendas is not None and len(df_tiendas):
-        for _t in df_tiendas.itertuples():
-            _et = f"{_t.nombre} · 🏪 Tienda {_NOMBRE_ESTADO_TIENDA.get(str(_t.estado_tienda), str(_t.estado_tienda).lower())}"
-            if str(getattr(_t, "ciudad", "") or "").strip():
-                _et += f" · {_t.ciudad}"
-            if str(getattr(_t, "cr", "") or "").strip():
-                _et += f" · CR {_t.cr}"
-            catalogo[_et] = {"tipo": "tienda", "fila": _t}
-    if df is not None and len(df):
-        for _p in df.itertuples():
-            if not str(_p.local_identificado).strip():
-                continue
-            _et = f"{_p.local_identificado} · 📍 {_p.fuente}"
-            if str(getattr(_p, "ciudad", "") or "").strip():
-                _et += f" · {_p.ciudad}"
-            if _et in catalogo:
-                _et += f" (#{_p.id})"
-            catalogo[_et] = {"tipo": "punto", "fila": _p}
-    etiquetas = sorted(catalogo.keys(), key=lambda x: x.lower())
-
-    elegido = st.selectbox(
-        f"Nombre del punto o tienda ({len(etiquetas)} registrados)",
-        etiquetas, index=None, key="sel_nombre_mapa_unico",
-        placeholder="Escribe una parte del nombre, ej. parque, y elige de la lista",
-    )
-    st.caption(
-        "🏪 = tienda OXXO ya existente (abierta, en expansión, firmada, en obra o cerrada) · 📍 = punto potencial "
-        "(de cualquier fuente). Escribe, por ejemplo, «parque» y salen todos los que lo contienen."
-    )
-    if elegido is not None:
-        _item = catalogo[elegido]
-        _f = _item["fila"]
-        if _item["tipo"] == "tienda":
-            try:
-                _lat, _lon = float(_f.latitud), float(_f.longitud)
-            except (TypeError, ValueError):
-                _lat = _lon = None
-            _lineas = [x for x in str(getattr(_f, "detalle", "") or "").split("\n") if x.strip()]
-            if not any(x.startswith("Estado") for x in _lineas):
-                _lineas.insert(0, f"Estado de la tienda: {_f.estado_tienda}")
-            if _lat is not None:
-                tienda_buscada = (str(_f.nombre), _lat, _lon)
-                consulta_punto = {
-                    "lat": _lat, "lon": _lon, "etiqueta": str(_f.nombre),
-                    "info_extra": "\n".join(_lineas),
-                }
-        else:
-            _lat, _lon = _f.latitud, _f.longitud
-            if pd.isna(_lat) or pd.isna(_lon):
-                st.warning(
-                    "Ese punto no tiene coordenadas registradas, así que no se puede "
-                    "mostrar en el mapa."
-                )
+        st.caption(
+            "🏪 = tienda OXXO ya existente (abierta, en expansión, firmada, en obra o cerrada) · 📍 = punto potencial "
+            "(de cualquier fuente). Escribe, por ejemplo, «parque» y salen todos los que lo contienen."
+        )
+        if elegido is not None:
+            _item = catalogo[elegido]
+            _f = _item["fila"]
+            if _item["tipo"] == "tienda":
+                try:
+                    _lat, _lon = float(_f.latitud), float(_f.longitud)
+                except (TypeError, ValueError):
+                    _lat = _lon = None
+                _lineas = [x for x in str(getattr(_f, "detalle", "") or "").split("\n") if x.strip()]
+                if not any(x.startswith("Estado") for x in _lineas):
+                    _lineas.insert(0, f"Estado de la tienda: {_f.estado_tienda}")
+                if _lat is not None:
+                    tienda_buscada = (str(_f.nombre), _lat, _lon)
+                    consulta_punto = {
+                        "lat": _lat, "lon": _lon, "etiqueta": str(_f.nombre),
+                        "info_extra": "\n".join(_lineas),
+                    }
             else:
-                id_punto_buscado = _f.id
-                def _v(x):
-                    return "—" if (x is None or pd.isna(x) or str(x).strip() == "") else str(x)
-                consulta_punto = {
-                    "lat": float(_lat), "lon": float(_lon), "etiqueta": str(_f.local_identificado),
-                    "info_extra": (
-                        f"Fuente: {_v(_f.fuente)}"
-                        f"\nResponsable: {_v(_f.especialista)}"
-                        f"\nEstado: {_v(_f.estado)}"
-                        f"\nFecha de registro: {_v(_f.fecha_registro)}"
-                        f"\nCiudad: {_v(_f.ciudad)}"
-                    ),
-                }
+                _lat, _lon = _f.latitud, _f.longitud
+                if pd.isna(_lat) or pd.isna(_lon):
+                    st.warning(
+                        "Ese punto no tiene coordenadas registradas, así que no se puede "
+                        "mostrar en el mapa."
+                    )
+                else:
+                    id_punto_buscado = _f.id
+                    def _v(x):
+                        return "—" if (x is None or pd.isna(x) or str(x).strip() == "") else str(x)
+                    consulta_punto = {
+                        "lat": float(_lat), "lon": float(_lon), "etiqueta": str(_f.local_identificado),
+                        "info_extra": (
+                            f"Fuente: {_v(_f.fuente)}"
+                            f"\nResponsable: {_v(_f.especialista)}"
+                            f"\nEstado: {_v(_f.estado)}"
+                            f"\nFecha de registro: {_v(_f.fecha_registro)}"
+                            f"\nCiudad: {_v(_f.ciudad)}"
+                        ),
+                    }
 
-else:  # Por coordenada
-    col_texto, col_boton = st.columns([5, 1], vertical_alignment="bottom")
-    coord_pegada = col_texto.text_input(
-        "Coordenada completa (latitud, longitud)", key="coord_pegada_mapa_unico",
-        placeholder="Ej. 4.697539545568918, -74.09220071349365",
-    )
-    if col_boton.button("🔍 Buscar", type="primary", key="buscar_coord_mapa_unico", use_container_width=True):
-        coord = parsear_coordenada_pegada(coord_pegada)
-        if coord is None:
-            st.session_state["error_busqueda_punto"] = True
-            st.session_state.pop("resultado_busqueda_punto", None)
-        else:
-            lat_e, lon_e = coord
-            st.session_state["resultado_busqueda_punto"] = {
-                "lat": lat_e, "lon": lon_e,
-                "etiqueta": f"Coordenada {lat_e:.5f}, {lon_e:.5f}",
-                "info_extra": f"Coordenada: {lat_e}, {lon_e}",
-            }
-            st.session_state["error_busqueda_punto"] = False
-    st.caption(
-        "Pégala completa, con todos los decimales (de Google Maps o "
-        "ArcGIS), para que el punto no se desplace."
-    )
-    if st.session_state.get("error_busqueda_punto"):
-        st.error(
-            "Eso no tiene forma de coordenada. Debe verse así: "
-            "4.697539545568918, -74.09220071349365"
+    else:  # Por coordenada
+        col_texto, col_boton = st.columns([5, 1], vertical_alignment="bottom")
+        coord_pegada = col_texto.text_input(
+            "Coordenada completa (latitud, longitud)", key="coord_pegada_mapa_unico",
+            placeholder="Ej. 4.697539545568918, -74.09220071349365",
         )
-    consulta_punto = st.session_state.get("resultado_busqueda_punto")
+        if col_boton.button("🔍 Buscar", type="primary", key="buscar_coord_mapa_unico", use_container_width=True):
+            coord = parsear_coordenada_pegada(coord_pegada)
+            if coord is None:
+                st.session_state["error_busqueda_punto"] = True
+                st.session_state.pop("resultado_busqueda_punto", None)
+            else:
+                lat_e, lon_e = coord
+                st.session_state["resultado_busqueda_punto"] = {
+                    "lat": lat_e, "lon": lon_e,
+                    "etiqueta": f"Coordenada {lat_e:.5f}, {lon_e:.5f}",
+                    "info_extra": f"Coordenada: {lat_e}, {lon_e}",
+                }
+                st.session_state["error_busqueda_punto"] = False
+        st.caption(
+            "Pégala completa, con todos los decimales (de Google Maps o "
+            "ArcGIS), para que el punto no se desplace."
+        )
+        if st.session_state.get("error_busqueda_punto"):
+            st.error(
+                "Eso no tiene forma de coordenada. Debe verse así: "
+                "4.697539545568918, -74.09220071349365"
+            )
+        consulta_punto = st.session_state.get("resultado_busqueda_punto")
 
-resaltado_mapa = None
-clave_mapa = "mapa_unico_modulo1_sin_busqueda"
+    resaltado_mapa = None
+    clave_mapa = "mapa_unico_modulo1_sin_busqueda"
 
-if consulta_punto is None:
-    st.info(
-        "Busca un punto arriba para ver aquí su Google Maps, su Street View "
-        "y si hay otros puntos cerca (posible duplicidad) o si está libre "
-        "para análisis."
-    )
-else:
-    lat_c, lon_c = consulta_punto["lat"], consulta_punto["lon"]
-    resaltado_mapa = (lat_c, lon_c, consulta_punto["etiqueta"], consulta_punto.get("info_extra", ""))
-    clave_mapa = f"mapa_unico_modulo1_{lat_c:.5f}_{lon_c:.5f}"
-
-    # 1) Google Maps y Street View del punto buscado
-    st.markdown("##### Google Maps y Street View")
-    col_mapa, col_calle = st.columns(2)
-    with col_mapa:
-        st.caption("Google Maps")
-        components.iframe(url_mapa_embed(lat_c, lon_c), height=380)
-    with col_calle:
-        st.caption("Street View (vista a nivel de calle)")
-        components.iframe(url_streetview_embed(lat_c, lon_c), height=380)
-    st.caption(
-        "Si el punto está en una zona sin cobertura de Street View, "
-        "Google muestra ahí mismo un aviso de que no hay imagen disponible."
-    )
-
-    # 2) Resultado: ¿hay algo cerca o está libre?
-    cercanos = detectar_coincidencias(df, lat_c, lon_c, consulta_punto.get("etiqueta", ""))
-    if id_punto_buscado is not None:
-        cercanos = cercanos[cercanos["id"] != id_punto_buscado]
-
-    st.markdown(f"##### Resultado para: {consulta_punto['etiqueta']}")
-    if cercanos.empty:
-        st.success(
-            f"✅ Este punto está **libre para análisis**: no hay ningún punto "
-            f"registrado a menos de {UMBRAL_DUPLICIDAD_M:.0f} m ni con un nombre parecido.",
-            icon="✅",
+    if consulta_punto is None:
+        st.info(
+            "Busca un punto arriba para ver aquí el mapa con lo que hay cerca, su "
+            "Google Maps, su Street View y si hay otros puntos cerca (posible "
+            "duplicidad) o si está libre para análisis."
         )
     else:
+        lat_c, lon_c = consulta_punto["lat"], consulta_punto["lon"]
+        resaltado_mapa = (lat_c, lon_c, consulta_punto["etiqueta"], consulta_punto.get("info_extra", ""))
+        clave_mapa = f"mapa_unico_modulo1_{lat_c:.5f}_{lon_c:.5f}"
+
+        st.button("✖ Quitar la búsqueda", key="quitar_busqueda_mapa_unico", on_click=_limpiar_busqueda_mapa)
+
+    # 2) El mapa con la búsqueda (en rojo) y las tiendas cercanas
+    st.markdown("##### Mapa")
+    solo_cerca = False
+    if resaltado_mapa is not None:
+        _vista = st.radio(
+            "¿Qué quieres ver en el mapa?",
+            ["📍 Solo lo cercano (a menos de 300 m)", "🗺️ Todo (con la búsqueda marcada en rojo)"],
+            horizontal=True, key="vista_mapa_busqueda",
+        )
+        solo_cerca = _vista.startswith("📍")
+    renderizar_mapa_general(
+        df, fuentes_activas=list(FUENTE_COLOR_ICONO.keys()), punto_resaltado=resaltado_mapa,
+        key=clave_mapa, altura=640, df_tiendas=df_tiendas,
+        radio_cerca_m=300 if solo_cerca else None,
+        centro=(resaltado_mapa[0], resaltado_mapa[1], 17 if solo_cerca else 16) if resaltado_mapa is not None else None,
+    )
+    st.caption(
+        "Pasa el mouse sobre un pin o una tienda para ver su información "
+        "(clic para dejar la tarjeta fija). Arriba del mapa eliges entre "
+        "**Mapa simple** (limpio, poco saturado) y **Mapa detallado** (calles "
+        "con nombres grandes, semáforos y TransMilenio), y prendes o apagas "
+        "cada capa. Si dos o más puntos caen en el mismo lugar, se abren uno "
+        "al lado del otro para que ninguno quede tapado."
+    )
+
+    if consulta_punto is not None:
+        # 3) Google Maps y Street View del punto buscado
+        st.markdown("##### Google Maps y Street View")
+        col_mapa, col_calle = st.columns(2)
+        with col_mapa:
+            st.caption("Google Maps")
+            components.iframe(url_mapa_embed(lat_c, lon_c), height=380)
+        with col_calle:
+            st.caption("Street View (vista a nivel de calle)")
+            components.iframe(url_streetview_embed(lat_c, lon_c), height=380)
+        st.caption(
+            "Si el punto está en una zona sin cobertura de Street View, "
+            "Google muestra ahí mismo un aviso de que no hay imagen disponible."
+        )
+
+        # 4) Resultado: tabla de posibles coincidencias (o libre) y tiendas OXXO cercanas
+        cercanos = detectar_coincidencias(df, lat_c, lon_c, consulta_punto.get("etiqueta", ""))
+        if id_punto_buscado is not None:
+            cercanos = cercanos[cercanos["id"] != id_punto_buscado]
+
+        st.markdown(f"##### Resultado para: {consulta_punto['etiqueta']}")
+        if cercanos.empty:
+            st.success(
+                f"✅ Este punto está **libre para análisis**: no hay ningún punto "
+                f"registrado a menos de {UMBRAL_DUPLICIDAD_M:.0f} m ni con un nombre parecido.",
+                icon="✅",
+            )
+        else:
+            st.warning(
+                f"⚠️ Posible duplicidad — hay {len(cercanos)} punto(s) cerca "
+                f"(a menos de {UMBRAL_DUPLICIDAD_M:.0f} m) o con nombre parecido.",
+                icon="⚠️",
+            )
+            en_el_mismo_lugar = cercanos[cercanos["distancia_m"] <= 15]
+            if not en_el_mismo_lugar.empty:
+                st.error(
+                    f"🔴 {len(en_el_mismo_lugar)} de ellos están prácticamente en el "
+                    "MISMO lugar (a 15 m o menos).",
+                    icon="🔴",
+                )
+            tabla_cercanos = pd.DataFrame({
+                "Fuente": cercanos["fuente"].values,
+                "Nombre": cercanos["local_identificado"].values,
+                "Responsable": cercanos["especialista"].replace("", "—").values,
+                "Practicante": cercanos["practicante"].replace("", "—").values if "practicante" in cercanos.columns else "—",
+                "Estado": cercanos["estado"].replace("", "Pendiente").values,
+                "Fecha de registro": cercanos["fecha_registro"].replace("", "—").values,
+                "Ciudad": cercanos["ciudad"].replace("", "—").values,
+                "Distancia": [
+                    f"{d:.0f} m" if d != float("inf") else "Sin coordenadas"
+                    for d in cercanos["distancia_m"]
+                ],
+                "Por qué aparece": cercanos["coincide_por"].values,
+            })
+            st.dataframe(tabla_cercanos, use_container_width=True, hide_index=True)
+
+        if df_tiendas is not None and len(df_tiendas):
+            tiendas_cerca = tiendas_cercanas(df_tiendas, lat_c, lon_c, 300)
+            if tienda_buscada is not None and len(tiendas_cerca):
+                tiendas_cerca = tiendas_cerca[
+                    ~((tiendas_cerca["nombre"] == tienda_buscada[0]) & (tiendas_cerca["distancia_m"] < 3))
+                ]
+            if tiendas_cerca.empty:
+                st.caption("🏪 No hay tiendas OXXO (abiertas, en expansión, firmadas, en obra ni cerradas) a menos de 300 m de este punto.")
+            else:
+                st.markdown(f"**🏪 Tiendas OXXO a menos de 300 m ({len(tiendas_cerca)}):**")
+                st.dataframe(
+                    pd.DataFrame({
+                        "Estado": tiendas_cerca["estado_tienda"].values,
+                        "CR": (tiendas_cerca["cr"] if "cr" in tiendas_cerca else tiendas_cerca["nombre"]).replace("", "—").values,
+                        "Tienda": tiendas_cerca["nombre"].replace("", "—").values,
+                        "Apertura": (tiendas_cerca["apertura"] if "apertura" in tiendas_cerca else tiendas_cerca["nombre"].map(lambda _: "")).replace("", "—").values,
+                        "Ciudad": tiendas_cerca["ciudad"].replace("", "—").values,
+                        "Distancia": [f"{d:.0f} m" for d in tiendas_cerca["distancia_m"]],
+                    }),
+                    use_container_width=True, hide_index=True,
+                )
+
+    if error_tiendas:
+        st.warning(f"No se pudieron cargar las tiendas OXXO: {error_tiendas}", icon="⚠️")
+    elif df_tiendas is None:
+        st.caption(
+            "🏪 Las tiendas OXXO todavía no están conectadas (falta el link de "
+            "la hoja con las tiendas abiertas, en expansión, firmadas, en obra y cerradas)."
+        )
+    else:
+        _diag_t = getattr(df_tiendas, "attrs", {}).get("diagnostico", {})
+        _por_estado = _diag_t.get("por_estado", {})
+        with st.expander(
+            f"🏪 Tiendas OXXO cargadas: {len(df_tiendas)} "
+            f"({', '.join(f'{v} {_PLURAL_ESTADO_TIENDA.get(k, k.lower())}' for k, v in _por_estado.items()) or 'ninguna'})"
+        ):
+            if _diag_t.get("error"):
+                st.error(_diag_t["error"])
+            st.caption(
+                f"Hoja leída: {df_tiendas.attrs.get('hoja', '—')} · columna de estado usada: "
+                f"{_diag_t.get('columna_estado') or 'no encontré ninguna'}"
+            )
+            if _diag_t.get("expansion_por_tipo"):
+                st.caption(
+                    f"{_diag_t['expansion_por_tipo']} tienda(s) abierta(s) se dibujan como «en expansión» "
+                    "(azul oscuro) porque su Tipo de tienda dice EXP 2025 o EXP 2026."
+                )
+            if _diag_t.get("sin_coordenada_valida"):
+                st.caption(f"{_diag_t['sin_coordenada_valida']} fila(s) sin coordenada válida, no se dibujan.")
+            if _diag_t.get("sin_estado_reconocido"):
+                st.caption(
+                    f"{_diag_t['sin_estado_reconocido']} fila(s) con un estado que no reconozco "
+                    f"(no se dibujan): {_diag_t.get('estados_no_reconocidos', {})}"
+                )
+            st.caption("Columnas de la hoja: " + ", ".join(map(str, _diag_t.get("columnas", []))))
+
+
+# ===== HOJA 2 · Resumen general ============================================
+with tab_resumen:
+    st.markdown("#### Resumen general de puntos potenciales")
+    st.metric("Total de puntos potenciales (todas las fuentes)", len(df))
+    resumen_fuente = (
+        df["fuente"].replace("", "Sin fuente").value_counts()
+        .rename_axis("Fuente").reset_index(name="Cantidad")
+    )
+    st.dataframe(resumen_fuente, hide_index=True, use_container_width=True)
+
+    st.markdown("**Puntos registrados por responsable, en cada fuente**")
+    cols_resumen_fuente = st.columns(2)
+    for i_fuente, (fuente_resumen, color_resumen) in enumerate(FUENTE_COLOR_ICONO.items()):
+        with cols_resumen_fuente[i_fuente % 2]:
+            sub_fuente = df[
+                (df["fuente"] == fuente_resumen) & (df["especialista"].astype(str).str.strip() != "")
+            ]
+            conteo_fuente = (
+                sub_fuente.groupby("especialista").size().reset_index(name="cantidad")
+                .sort_values("cantidad", ascending=False)
+            )
+
+            st.markdown(f"*{fuente_resumen}*")
+            if conteo_fuente.empty:
+                st.caption("Todavía no hay datos para graficar.")
+            else:
+                # Se muestran solo los 5 con más puntos, para que la
+                # gráfica quede compacta — si tiene más, usa el ícono de
+                # pantalla completa que trae la gráfica (arriba a la
+                # derecha, al pasar el mouse) para verla más grande y sin
+                # que los nombres queden cortados.
+                top5_fuente = conteo_fuente.head(5)
+                # Altura mínima generosa (y bastante espacio por barra) para
+                # que con pocas categorías (1 o 2) las barras y sus nombres
+                # no queden amontonados/superpuestos — con "cantidad" como
+                # entero se fuerzan los ticks del eje X a números enteros.
+                chart_fuente = (
+                    alt.Chart(top5_fuente)
+                    .mark_bar(color=_COLORES_HEX_LEYENDA.get(color_resumen, OXXO_ROJO), cornerRadiusEnd=4)
+                    .encode(
+                        x=alt.X("cantidad:Q", title="Puntos", axis=alt.Axis(tickMinStep=1)),
+                        y=alt.Y(
+                            "especialista:N", title=None, sort="-x",
+                            axis=alt.Axis(labelLimit=160),
+                            scale=alt.Scale(paddingInner=0.35, paddingOuter=0.3),
+                        ),
+                        tooltip=[
+                            alt.Tooltip("especialista:N", title="Especialista / responsable"),
+                            alt.Tooltip("cantidad:Q", title="Puntos"),
+                        ],
+                    )
+                    .properties(height=max(120, 42 * len(top5_fuente)))
+                )
+                st.altair_chart(chart_fuente, use_container_width=True)
+                if len(conteo_fuente) > 5:
+                    st.caption(f"Mostrando los 5 con más puntos, de {len(conteo_fuente)} responsables.")
+
+# ===== HOJA 3 · Duplicados =================================================
+with tab_dup:
+    st.subheader("⚠️ Duplicados")
+    # Aviso: puntos que están uno encima del otro en el mismo lugar.
+    apilados = detectar_apilados(df, list(FUENTE_COLOR_ICONO.keys()))
+    if not apilados.empty:
         st.warning(
-            f"⚠️ Posible duplicidad — hay {len(cercanos)} punto(s) cerca "
-            f"(a menos de {UMBRAL_DUPLICIDAD_M:.0f} m) o con nombre parecido.",
+            f"⚠️ Hay {len(apilados)} lugar(es) con más de un punto en el mismo "
+            "sitio (por ejemplo, uno de Operación encima de uno de Especialistas).",
             icon="⚠️",
         )
-        en_el_mismo_lugar = cercanos[cercanos["distancia_m"] <= 15]
-        if not en_el_mismo_lugar.empty:
-            st.error(
-                f"🔴 {len(en_el_mismo_lugar)} de ellos están prácticamente en el "
-                "MISMO lugar (a 15 m o menos).",
-                icon="🔴",
+        with st.expander("Ver cuáles son", expanded=True):
+            st.caption("Haz clic en una fila para verla en el mapa, con la información de todos los puntos que coinciden.")
+            evento_apilados = st.dataframe(
+                apilados[COLUMNAS_APILADOS], use_container_width=True, hide_index=True,
+                on_select="rerun", selection_mode="single-row", key="tabla_apilados_mapa_unico",
             )
-        tabla_cercanos = pd.DataFrame({
-            "Fuente": cercanos["fuente"].values,
-            "Nombre": cercanos["local_identificado"].values,
-            "Responsable": cercanos["especialista"].replace("", "—").values,
-            "Practicante": cercanos["practicante"].replace("", "—").values if "practicante" in cercanos.columns else "—",
-            "Estado": cercanos["estado"].replace("", "Pendiente").values,
-            "Fecha de registro": cercanos["fecha_registro"].replace("", "—").values,
-            "Ciudad": cercanos["ciudad"].replace("", "—").values,
-            "Distancia": [
-                f"{d:.0f} m" if d != float("inf") else "Sin coordenadas"
-                for d in cercanos["distancia_m"]
-            ],
-            "Por qué aparece": cercanos["coincide_por"].values,
-        })
-        st.dataframe(tabla_cercanos, use_container_width=True, hide_index=True)
+            filas_sel_apilados = list(evento_apilados.selection.rows) if evento_apilados is not None else []
+            if filas_sel_apilados:
+                grupo = apilados.iloc[filas_sel_apilados[0]]
+                puntos_grupo = df[df["id"].isin(grupo["_ids"])].dropna(subset=["latitud", "longitud"])
+                st.markdown(
+                    f"**Estos {len(puntos_grupo)} puntos están en el mismo lugar** — "
+                    "pasa el mouse por cada pin, o mira la tabla de abajo:"
+                )
+                renderizar_mapa_general(
+                    df, fuentes_activas=list(FUENTE_COLOR_ICONO.keys()),
+                    punto_resaltado=None,
+                    key=f"mapa_apilados_{filas_sel_apilados[0]}_{grupo['Coordenada']}",
+                    altura=460, centro=(grupo["_lat"], grupo["_lon"], 18),
+                    solo_ids=list(grupo["_ids"]), mostrar_capas_vacias=False,
+                )
+                st.dataframe(
+                    pd.DataFrame({
+                        "Fuente": puntos_grupo["fuente"].values,
+                        "Nombre": puntos_grupo["local_identificado"].values,
+                        "Responsable": puntos_grupo["especialista"].replace("", "—").values,
+                        "Practicante": puntos_grupo["practicante"].replace("", "—").values if "practicante" in puntos_grupo.columns else "—",
+                        "Estado": puntos_grupo["estado"].replace("", "Pendiente").values,
+                        "Fecha de registro": puntos_grupo["fecha_registro"].replace("", "—").values,
+                        "Ciudad": puntos_grupo["ciudad"].replace("", "—").values,
+                    }),
+                    use_container_width=True, hide_index=True,
+                )
 
-    if df_tiendas is not None and len(df_tiendas):
-        tiendas_cerca = tiendas_cercanas(df_tiendas, lat_c, lon_c, 300)
-        if tienda_buscada is not None and len(tiendas_cerca):
-            tiendas_cerca = tiendas_cerca[
-                ~((tiendas_cerca["nombre"] == tienda_buscada[0]) & (tiendas_cerca["distancia_m"] < 3))
-            ]
-        if tiendas_cerca.empty:
-            st.caption("🏪 No hay tiendas OXXO (abiertas, en expansión, firmadas, en obra ni cerradas) a menos de 300 m de este punto.")
-        else:
-            st.markdown(f"**🏪 Tiendas OXXO a menos de 300 m ({len(tiendas_cerca)}):**")
-            st.dataframe(
-                pd.DataFrame({
-                    "Estado": tiendas_cerca["estado_tienda"].values,
-                    "CR": (tiendas_cerca["cr"] if "cr" in tiendas_cerca else tiendas_cerca["nombre"]).replace("", "—").values,
-                    "Tienda": tiendas_cerca["nombre"].replace("", "—").values,
-                    "Apertura": (tiendas_cerca["apertura"] if "apertura" in tiendas_cerca else tiendas_cerca["nombre"].map(lambda _: "")).replace("", "—").values,
-                    "Ciudad": tiendas_cerca["ciudad"].replace("", "—").values,
-                    "Distancia": [f"{d:.0f} m" for d in tiendas_cerca["distancia_m"]],
-                }),
-                use_container_width=True, hide_index=True,
-            )
-    st.button("✖ Quitar la búsqueda", key="quitar_busqueda_mapa_unico", on_click=_limpiar_busqueda_mapa)
-
-# 3) El mapa con todos los puntos y tiendas (el buscado, en rojo)
-st.markdown("##### Mapa")
-solo_cerca = False
-if resaltado_mapa is not None:
-    _vista = st.radio(
-        "¿Qué quieres ver en el mapa?",
-        ["📍 Solo lo cercano (a menos de 300 m)", "🗺️ Todo (con la búsqueda marcada en rojo)"],
-        horizontal=True, key="vista_mapa_busqueda",
-    )
-    solo_cerca = _vista.startswith("📍")
-renderizar_mapa_general(
-    df, fuentes_activas=list(FUENTE_COLOR_ICONO.keys()), punto_resaltado=resaltado_mapa,
-    key=clave_mapa, altura=640, df_tiendas=df_tiendas,
-    radio_cerca_m=300 if solo_cerca else None,
-    centro=(resaltado_mapa[0], resaltado_mapa[1], 17 if solo_cerca else 16) if resaltado_mapa is not None else None,
-)
-st.caption(
-    "Pasa el mouse sobre un pin o una tienda para ver su información "
-    "(clic para dejar la tarjeta fija). Arriba del mapa eliges entre "
-    "**Mapa simple** (limpio, poco saturado) y **Mapa detallado** (calles "
-    "con nombres grandes, semáforos y TransMilenio), y prendes o apagas "
-    "cada capa. Si dos o más puntos caen en el mismo lugar, se abren uno "
-    "al lado del otro para que ninguno quede tapado."
-)
-if error_tiendas:
-    st.warning(f"No se pudieron cargar las tiendas OXXO: {error_tiendas}", icon="⚠️")
-elif df_tiendas is None:
+    st.divider()
+    st.markdown("#### 📋 Posibles duplicados")
     st.caption(
-        "🏪 Las tiendas OXXO todavía no están conectadas (falta el link de "
-        "la hoja con las tiendas abiertas, en expansión, firmadas, en obra y cerradas)."
+        "Compara cada punto contra los demás, sin importar de cuál de las "
+        "5 fuentes venga. Se marca como posible duplicado si: la "
+        "coordenada es casi exacta (≤ 15 m, sin importar el nombre), o "
+        "están cerca (≤ " + f"{UMBRAL_DUPLICIDAD_M:.0f}" + " m) Y el nombre se "
+        "parece, o tienen exactamente el mismo nombre en cualquier "
+        "ubicación."
     )
-else:
-    _diag_t = getattr(df_tiendas, "attrs", {}).get("diagnostico", {})
-    _por_estado = _diag_t.get("por_estado", {})
-    with st.expander(
-        f"🏪 Tiendas OXXO cargadas: {len(df_tiendas)} "
-        f"({', '.join(f'{v} {_PLURAL_ESTADO_TIENDA.get(k, k.lower())}' for k, v in _por_estado.items()) or 'ninguna'})"
-    ):
-        if _diag_t.get("error"):
-            st.error(_diag_t["error"])
-        st.caption(
-            f"Hoja leída: {df_tiendas.attrs.get('hoja', '—')} · columna de estado usada: "
-            f"{_diag_t.get('columna_estado') or 'no encontré ninguna'}"
+    duplicados_m1 = detectar_duplicados_potenciales(df)
+    if duplicados_m1.empty:
+        st.success("No se encontraron posibles duplicados.")
+    else:
+        st.warning(f"Se encontraron {len(duplicados_m1)} posible(s) duplicado(s):")
+        tabla_dup_m1 = duplicados_m1.copy()
+        tabla_dup_m1["coordenada"] = tabla_dup_m1.apply(
+            lambda r: f"{r['latitud']:.15f}, {r['longitud']:.15f}", axis=1
         )
-        if _diag_t.get("expansion_por_tipo"):
-            st.caption(
-                f"{_diag_t['expansion_por_tipo']} tienda(s) abierta(s) se dibujan como «en expansión» "
-                "(azul oscuro) porque su Tipo de tienda dice EXP 2025 o EXP 2026."
-            )
-        if _diag_t.get("sin_coordenada_valida"):
-            st.caption(f"{_diag_t['sin_coordenada_valida']} fila(s) sin coordenada válida, no se dibujan.")
-        if _diag_t.get("sin_estado_reconocido"):
-            st.caption(
-                f"{_diag_t['sin_estado_reconocido']} fila(s) con un estado que no reconozco "
-                f"(no se dibujan): {_diag_t.get('estados_no_reconocidos', {})}"
-            )
-        st.caption("Columnas de la hoja: " + ", ".join(map(str, _diag_t.get("columnas", []))))
+        evento_dup_m1 = st.dataframe(
+            tabla_dup_m1[["nombre", "nombre_duplicado", "coordenada", "motivo"]].rename(columns={
+                "nombre": "Nombre", "nombre_duplicado": "Posible duplicado",
+                "coordenada": "Coordenada", "motivo": "Motivo de duplicado",
+            }),
+            use_container_width=True, hide_index=True,
+            on_select="rerun", selection_mode="single-row", key="tabla_duplicados_m1",
+        )
+        filas_sel_m1 = list(evento_dup_m1.selection.rows) if evento_dup_m1 is not None else []
+        if filas_sel_m1:
+            par = duplicados_m1.iloc[filas_sel_m1[0]]
 
-# 4) Aviso: puntos que están uno encima del otro en el mismo lugar.
-apilados = detectar_apilados(df, list(FUENTE_COLOR_ICONO.keys()))
-if not apilados.empty:
-    st.warning(
-        f"⚠️ Hay {len(apilados)} lugar(es) con más de un punto en el mismo "
-        "sitio (por ejemplo, uno de Operación encima de uno de Especialistas).",
-        icon="⚠️",
-    )
-    with st.expander("Ver cuáles son", expanded=True):
-        st.caption("Haz clic en una fila para verla en el mapa, con la información de todos los puntos que coinciden.")
-        evento_apilados = st.dataframe(
-            apilados[COLUMNAS_APILADOS], use_container_width=True, hide_index=True,
-            on_select="rerun", selection_mode="single-row", key="tabla_apilados_mapa_unico",
-        )
-        filas_sel_apilados = list(evento_apilados.selection.rows) if evento_apilados is not None else []
-        if filas_sel_apilados:
-            grupo = apilados.iloc[filas_sel_apilados[0]]
-            puntos_grupo = df[df["id"].isin(grupo["_ids"])].dropna(subset=["latitud", "longitud"])
+            def _info_extra_punto(id_punto):
+                # Trae toda la info del punto (especialista, cuándo se
+                # solicitó, practicante, etc.) para mostrarla al pasar el
+                # mouse sobre el pin resaltado en el mapa de abajo.
+                coincidencias_id = df[df["id"] == id_punto]
+                if coincidencias_id.empty:
+                    return ""
+                f = coincidencias_id.iloc[0]
+                return (
+                    f"Fuente: {f.get('fuente', '') or '—'}"
+                    f"\nEspecialista/responsable: {f.get('especialista', '') or '—'}"
+                    f"\nCuándo se solicitó: {f.get('fecha_registro', '') or '—'}"
+                    f"\nPracticante: {f.get('practicante', '') or '—'}"
+                    f"\nEstado: {f.get('estado', '') or '—'}"
+                )
+
             st.markdown(
-                f"**Estos {len(puntos_grupo)} puntos están en el mismo lugar** — "
-                "pasa el mouse por cada pin, o mira la tabla de abajo:"
+                f"**Mostrando en el mapa SOLO estos dos: '{par['nombre']}' y su "
+                f"posible duplicado '{par['nombre_duplicado']}'** — pasa el mouse "
+                "sobre cada pin para ver toda su información."
             )
             renderizar_mapa_general(
-                df, fuentes_activas=list(FUENTE_COLOR_ICONO.keys()),
-                punto_resaltado=None,
-                key=f"mapa_apilados_{filas_sel_apilados[0]}_{grupo['Coordenada']}",
-                altura=460, centro=(grupo["_lat"], grupo["_lon"], 18),
-                solo_ids=list(grupo["_ids"]), mostrar_capas_vacias=False,
+                df, fuentes_activas=[],
+                punto_resaltado=[
+                    (par["latitud"], par["longitud"], par["nombre"], _info_extra_punto(par["id"])),
+                    (
+                        par["latitud_duplicado"], par["longitud_duplicado"], par["nombre_duplicado"],
+                        _info_extra_punto(par["id_duplicado"]),
+                    ),
+                ],
+                key="mapa_duplicado_m1_seleccionado",
+                altura=480, mostrar_capas_vacias=False,
             )
-            st.dataframe(
-                pd.DataFrame({
-                    "Fuente": puntos_grupo["fuente"].values,
-                    "Nombre": puntos_grupo["local_identificado"].values,
-                    "Responsable": puntos_grupo["especialista"].replace("", "—").values,
-                    "Practicante": puntos_grupo["practicante"].replace("", "—").values if "practicante" in puntos_grupo.columns else "—",
-                    "Estado": puntos_grupo["estado"].replace("", "Pendiente").values,
-                    "Fecha de registro": puntos_grupo["fecha_registro"].replace("", "—").values,
-                    "Ciudad": puntos_grupo["ciudad"].replace("", "—").values,
-                }),
-                use_container_width=True, hide_index=True,
-            )
-
-st.divider()
-st.markdown("#### 📋 Posibles duplicados")
-st.caption(
-    "Compara cada punto contra los demás, sin importar de cuál de las "
-    "5 fuentes venga. Se marca como posible duplicado si: la "
-    "coordenada es casi exacta (≤ 15 m, sin importar el nombre), o "
-    "están cerca (≤ " + f"{UMBRAL_DUPLICIDAD_M:.0f}" + " m) Y el nombre se "
-    "parece, o tienen exactamente el mismo nombre en cualquier "
-    "ubicación."
-)
-duplicados_m1 = detectar_duplicados_potenciales(df)
-if duplicados_m1.empty:
-    st.success("No se encontraron posibles duplicados.")
-else:
-    st.warning(f"Se encontraron {len(duplicados_m1)} posible(s) duplicado(s):")
-    tabla_dup_m1 = duplicados_m1.copy()
-    tabla_dup_m1["coordenada"] = tabla_dup_m1.apply(
-        lambda r: f"{r['latitud']:.15f}, {r['longitud']:.15f}", axis=1
-    )
-    evento_dup_m1 = st.dataframe(
-        tabla_dup_m1[["nombre", "nombre_duplicado", "coordenada", "motivo"]].rename(columns={
-            "nombre": "Nombre", "nombre_duplicado": "Posible duplicado",
-            "coordenada": "Coordenada", "motivo": "Motivo de duplicado",
-        }),
-        use_container_width=True, hide_index=True,
-        on_select="rerun", selection_mode="single-row", key="tabla_duplicados_m1",
-    )
-    filas_sel_m1 = list(evento_dup_m1.selection.rows) if evento_dup_m1 is not None else []
-    if filas_sel_m1:
-        par = duplicados_m1.iloc[filas_sel_m1[0]]
-
-        def _info_extra_punto(id_punto):
-            # Trae toda la info del punto (especialista, cuándo se
-            # solicitó, practicante, etc.) para mostrarla al pasar el
-            # mouse sobre el pin resaltado en el mapa de abajo.
-            coincidencias_id = df[df["id"] == id_punto]
-            if coincidencias_id.empty:
-                return ""
-            f = coincidencias_id.iloc[0]
-            return (
-                f"Fuente: {f.get('fuente', '') or '—'}"
-                f"\nEspecialista/responsable: {f.get('especialista', '') or '—'}"
-                f"\nCuándo se solicitó: {f.get('fecha_registro', '') or '—'}"
-                f"\nPracticante: {f.get('practicante', '') or '—'}"
-                f"\nEstado: {f.get('estado', '') or '—'}"
-            )
-
-        st.markdown(
-            f"**Mostrando en el mapa SOLO estos dos: '{par['nombre']}' y su "
-            f"posible duplicado '{par['nombre_duplicado']}'** — pasa el mouse "
-            "sobre cada pin para ver toda su información."
-        )
-        renderizar_mapa_general(
-            df, fuentes_activas=[],
-            punto_resaltado=[
-                (par["latitud"], par["longitud"], par["nombre"], _info_extra_punto(par["id"])),
-                (
-                    par["latitud_duplicado"], par["longitud_duplicado"], par["nombre_duplicado"],
-                    _info_extra_punto(par["id_duplicado"]),
-                ),
-            ],
-            key="mapa_duplicado_m1_seleccionado",
-            altura=480, mostrar_capas_vacias=False,
-        )
-
 
 st.divider()
 st.caption(
