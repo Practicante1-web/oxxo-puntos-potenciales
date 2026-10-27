@@ -715,6 +715,7 @@ mapEl.addEventListener('dblclick',function(e){ if(R.on) return; var r=wrap.getBo
 $('zin').addEventListener('click',function(){ zoomAt(W/2,H/2,view.z+1); fetchExtra(); });
 $('zout').addEventListener('click',function(){ zoomAt(W/2,H/2,view.z-1); fetchExtra(); });
 window.addEventListener('resize',refresh);
+if(window.ResizeObserver){ try{ new ResizeObserver(function(){ refresh(); }).observe(wrap); }catch(e){} }  // por si el mapa estaba en una pestaña oculta
 
 /* ---------- vista inicial ---------- */
 function fit(list){
