@@ -86,6 +86,8 @@ def construir_html_mapa(
     altura: int = 620,
     capas_apagadas=None,
     tiendas_apagadas=None,
+    zonas=None,
+    grupos_tiendas=None,
 ) -> str:
     """
     Devuelve el HTML completo del mapa.
@@ -96,6 +98,11 @@ def construir_html_mapa(
     - colores_hex: {clave de color: hex} para la leyenda.
     - resaltados: lista de (lat, lon, etiqueta[, info_extra]) — se dibujan en
       ROJO, encima de todo.
+    - zonas: lista de zonas dibujadas (polígonos de Google My Maps) o None.
+      Cada una: {nombre, descripcion, color, anillos, huecos, lineas}.
+    - grupos_tiendas: {grupo: color hex}. Si se da, las tiendas se dibujan como
+      puntos de color según su columna «grupo» (por ejemplo el jefe de zona o el
+      regional), en vez de los íconos por estado.
     - tiendas: DataFrame de tiendas OXXO (columnas: nombre, estado_tienda,
       ciudad, direccion, latitud, longitud, detalle) o None.
     - centro: (lat, lon, zoom). Si no se da y hay resaltados, se centra en
@@ -146,13 +153,18 @@ def construir_html_mapa(
                         lineas.append(f"{etiqueta}: {val}")
             if str(row.get("direccion", "") or "").strip() not in ("", "nan"):
                 lineas.append(f"Dirección: {row.get('direccion')}")
-            tds.append({
+            item_t = {
                 "a": round(float(row["latitud"]), 7),
                 "o": round(float(row["longitud"]), 7),
                 "e": estado,
                 "t": str(row.get("nombre", "") or "Tienda OXXO"),
                 "l": lineas,
-            })
+            }
+            if grupos_tiendas:
+                g = str(row.get("grupo", "") or "Sin asignar")
+                item_t["g"] = g
+                item_t["gc"] = grupos_tiendas.get(g, "#9AA0A6")
+            tds.append(item_t)
 
     if centro is not None:
         vista = [float(centro[0]), float(centro[1]), float(centro[2])]
@@ -160,6 +172,18 @@ def construir_html_mapa(
         vista = None  # se ajusta sola a los resaltados (JavaScript)
     else:
         vista = [4.6097, -74.0817, 10.5]
+
+    paleta_zonas = ["#E11E1E", "#1D4ED8", "#16A34A", "#F59E0B", "#7C3AA8", "#0891B2", "#DB2777", "#65A30D",
+                    "#EA580C", "#0F766E", "#4F46E5", "#B45309"]
+    zonas_js = []
+    for i, z in enumerate(zonas or []):
+        zonas_js.append({
+            "n": str(z.get("nombre", "") or "Zona"),
+            "c": z.get("color") or paleta_zonas[i % len(paleta_zonas)],
+            "d": [x for x in (z.get("lineas") or []) if str(x).strip()],
+            "r": [[[round(p[0], 6), round(p[1], 6)] for p in a] for a in z.get("anillos", [])],
+            "h": [[[round(p[0], 6), round(p[1], 6)] for p in a] for a in z.get("huecos", [])],
+        })
 
     datos = {
         "pts": pts,
@@ -180,7 +204,9 @@ def construir_html_mapa(
                 "off": e in tiendas_apagadas,
             }
             for e in ESTADOS_TIENDA
-        ] if tds else [],
+        ] if (tiendas is not None and not grupos_tiendas) else [],   # los botones de tiendas salen siempre (con 0 si no hay ninguna cerca)
+        "grupos": [{"key": k, "hex": v} for k, v in (grupos_tiendas or {}).items()],
+        "zonas": zonas_js,
         "semaforo": _SEMAFORO_SVG,
         "tm": _TM_SVG,
         "rojo_hex": colores_hex.get("rojo", "#E11E1E"),
@@ -234,6 +260,10 @@ _PLANTILLA = r"""<!DOCTYPE html>
   #tip .pie { margin-top:6px; color:#8A8A90; font-size:12.5px; }
   #map.regla { cursor:crosshair; }
   #rsvg { position:absolute; left:0; top:0; width:100%; height:100%; z-index:3; pointer-events:none; overflow:hidden; }
+  #zsvg { position:absolute; left:0; top:0; width:100%; height:100%; z-index:1; pointer-events:none; overflow:hidden; }
+  #ztip { position:absolute; z-index:40; display:none; background:#fff; border:1px solid #CFCFD6; border-radius:10px;
+    box-shadow:0 6px 20px rgba(0,0,0,.25); padding:8px 12px; font-size:14px; line-height:1.5; max-width:320px; pointer-events:none; }
+  #ztip .tt { font-weight:700; }
   #regla { position:absolute; left:10px; top:10px; z-index:25; display:none; background:#fff; border:1px solid #CFCFD6; border-radius:12px;
     box-shadow:0 4px 16px rgba(0,0,0,.2); padding:9px 12px; font-size:13.5px; line-height:1.45; max-width:260px; }
   #regla .tot { font-size:20px; font-weight:700; color:#1D4ED8; }
@@ -250,12 +280,13 @@ _PLANTILLA = r"""<!DOCTYPE html>
 <div id="app">
   <div id="bar"></div>
   <div id="mapwrap">
-    <div id="map"><div id="vec"></div><div id="tiles"></div><div id="marks"></div><svg id="rsvg" xmlns="http://www.w3.org/2000/svg"></svg></div>
+    <div id="map"><div id="vec"></div><div id="tiles"></div><svg id="zsvg" xmlns="http://www.w3.org/2000/svg"></svg><div id="marks"></div><svg id="rsvg" xmlns="http://www.w3.org/2000/svg"></svg></div>
     <div id="regla"></div>
     <div id="zoom"><button id="zin" title="Acercar">+</button><button id="zout" title="Alejar">&minus;</button></div>
     <div id="estado"></div>
     <div id="attr"></div>
     <div id="tip"></div>
+    <div id="ztip"></div>
   </div>
 </div>
 <script>
@@ -319,10 +350,23 @@ var R = { on:false, pts:[] };      // regla para medir distancias
 
 var capaOn = {}, tiendaOn = {};
 
+function circleUri(hex, anillo){
+  var f=anillo?'%23FFFFFF':encodeURIComponent(hex), op=anillo?'1':'1';
+  return 'data:image/svg+xml;utf8,'+
+    "%3Csvg xmlns='http://www.w3.org/2000/svg' width='30' height='30' viewBox='0 0 30 30'%3E"+
+    "%3Ccircle cx='15' cy='15' r='11.5' fill='"+f+"' stroke='"+encodeURIComponent(hex)+"' stroke-width='"+(anillo?'5':'3')+"'/%3E"+
+    (anillo?"":"%3Ccircle cx='15' cy='15' r='13.5' fill='none' stroke='%23FFFFFF' stroke-width='1.5'/%3E")+
+    "%3C/svg%3E";
+}
 function build(){
   // tiendas (debajo de los pines)
   var cfgT={}; D.tiendas_cfg.forEach(function(c){ cfgT[c.key]=c; tiendaOn[c.key]=!c.off; });
+  D.grupos.forEach(function(g){ tiendaOn[g.key]=true; });
   D.tds.forEach(function(t){
+    if(D.grupos.length){      // modo grupos: puntos de color (jefe de zona, regional…)
+      addMark({kind:'t', sq:true, a:t.a, o:t.o, grp:t.g, src:circleUri(t.gc, t.e==='Cerrada'), w:1, h:1, t:t.t, l:t.l, z:2});
+      return;
+    }
     var c=cfgT[t.e]; if(!c) return;
     addMark({kind:'t', a:t.a, o:t.o, grp:t.e, src:c.icono, w:c.w, h:c.h, t:t.t, l:t.l, z:2});
   });
@@ -360,6 +404,27 @@ if(D.tiendas_cfg.length){
     chip('<img src="'+c.icono+'">'+esc(c.label||('Tiendas '+c.key.toLowerCase()+'s'))+' <span class="n">'+(counts[c.key]||0)+'</span>', !c.off, function(b){
       tiendaOn[c.key]=!tiendaOn[c.key]; b.classList.toggle('off',!tiendaOn[c.key]); refresh();
     });
+  });
+}
+if(D.grupos.length){
+  var sg=document.createElement('span'); sg.className='sep'; bar.appendChild(sg);
+  var chipsG=[];
+  D.grupos.forEach(function(g){
+    var b=chip('<span class="dot" style="background:'+g.hex+'"></span>'+esc(g.key)+' <span class="n">'+(counts[g.key]||0)+'</span>', true, function(b){
+      tiendaOn[g.key]=!tiendaOn[g.key]; b.classList.toggle('off',!tiendaOn[g.key]); refresh();
+    });
+    chipsG.push([g.key,b]);
+  });
+  if(D.grupos.length>=4){
+    chip('<b>Ver todos</b>', true, function(){ chipsG.forEach(function(p){ tiendaOn[p[0]]=true; p[1].classList.remove('off'); }); refresh(); });
+    chip('<b>Quitar todos</b>', true, function(){ chipsG.forEach(function(p){ tiendaOn[p[0]]=false; p[1].classList.add('off'); }); refresh(); });
+  }
+}
+var zonasOn=true;
+if(D.zonas.length){
+  var sz=document.createElement('span'); sz.className='sep'; bar.appendChild(sz);
+  chip('<span class="dot" style="background:#6B7280;border-radius:3px"></span>Zonas de especialistas <span class="n">'+D.zonas.length+'</span>', true, function(b){
+    zonasOn=!zonasOn; b.classList.toggle('off',!zonasOn); refresh();
   });
 }
 var chipSem=chip('<img src="'+D.semaforo+'" style="height:18px"> Semáforos', true, function(b){
@@ -475,6 +540,64 @@ function panelRegla(){
   if(u) u.addEventListener('click',function(){ R.pts.pop(); panelRegla(); refresh(); });
   if(c) c.addEventListener('click',function(){ R.pts=[]; panelRegla(); refresh(); });
 }
+var zsvg=$('zsvg'), ztip=$('ztip');
+function dentroAnillo(lat,lon,a){
+  var d=false, n=a.length, j=n-1;
+  for(var i=0;i<n;i++){
+    var yi=a[i][0], xi=a[i][1], yj=a[j][0], xj=a[j][1];
+    if((yi>lat)!==(yj>lat) && lon<(xj-xi)*(lat-yi)/((yj-yi)||1e-18)+xi) d=!d;
+    j=i;
+  }
+  return d;
+}
+function zonasEn(lat,lon){
+  var r=[];
+  D.zonas.forEach(function(z){
+    var en=false; z.r.forEach(function(a){ if(dentroAnillo(lat,lon,a)) en=true; });
+    if(en){ z.h.forEach(function(a){ if(dentroAnillo(lat,lon,a)) en=false; }); }
+    if(en) r.push(z);
+  });
+  return r;
+}
+function drawZonas(cx,cy){
+  while(zsvg.firstChild) zsvg.removeChild(zsvg.firstChild);
+  if(!D.zonas.length || !zonasOn) return;
+  D.zonas.forEach(function(z){
+    var d='', sx=0, sy=0, np=0;
+    function anillo(a){
+      var t='';
+      for(var i=0;i<a.length;i++){ var p=proj(a[i][0],a[i][1],view.z), x=W/2+p[0]-cx, y=H/2+p[1]-cy; t+=(i?'L':'M')+x.toFixed(1)+' '+y.toFixed(1); }
+      return t+'Z';
+    }
+    z.r.forEach(function(a){
+      d+=anillo(a);
+      for(var i=0;i<a.length;i++){ var p=proj(a[i][0],a[i][1],view.z); sx+=p[0]; sy+=p[1]; np++; }
+    });
+    z.h.forEach(function(a){ d+=anillo(a); });
+    zsvg.appendChild(svgEl('path',{d:d,'fill-rule':'evenodd',fill:z.c,'fill-opacity':'0.22',stroke:z.c,'stroke-width':'2.2','stroke-opacity':'0.9','stroke-linejoin':'round'}));
+    if(np && view.z>=12){
+      var lx=W/2+sx/np-cx, ly=H/2+sy/np-cy;
+      if(lx>0 && lx<W && ly>0 && ly<H){
+        var tx=svgEl('text',{x:lx.toFixed(1),y:ly.toFixed(1),'text-anchor':'middle','font-size':'13','font-weight':'700',fill:'#222','stroke':'#fff','stroke-width':'3.5','paint-order':'stroke','font-family':'Segoe UI,Arial,sans-serif'});
+        tx.textContent=z.n; zsvg.appendChild(tx);
+      }
+    }
+  });
+}
+mapEl.addEventListener('pointermove',function(e){
+  if(!D.zonas.length || !zonasOn || drag || hoverMark || pinned){ ztip.style.display='none'; return; }
+  var r=wrap.getBoundingClientRect(), c=proj(view.lat,view.lon,view.z);
+  var g=unproj(c[0]+(e.clientX-r.left-W/2), c[1]+(e.clientY-r.top-H/2), view.z);
+  var zs=zonasEn(g[0],g[1]);
+  if(!zs.length){ ztip.style.display='none'; return; }
+  var h=''; zs.forEach(function(z,i){ h+=(i?'<hr style="border:0;border-top:1px dashed #D9D9DE;margin:6px 0">':'')+'<div class="tt">'+esc(z.n)+'</div>'; z.d.forEach(function(x){ h+='<div>'+esc(x)+'</div>'; }); });
+  ztip.innerHTML=h; ztip.style.display='block';
+  var x=e.clientX-r.left+16, y=e.clientY-r.top+16;
+  if(x+ztip.offsetWidth>W-6) x=e.clientX-r.left-16-ztip.offsetWidth;
+  if(y+ztip.offsetHeight>H-6) y=e.clientY-r.top-16-ztip.offsetHeight;
+  ztip.style.left=Math.max(6,x)+'px'; ztip.style.top=Math.max(6,y)+'px';
+});
+mapEl.addEventListener('pointerleave',function(){ ztip.style.display='none'; });
 function svgEl(n,at){ var e=document.createElementNS('http://www.w3.org/2000/svg',n); for(var k in at) e.setAttribute(k,at[k]); return e; }
 function drawRegla(cx,cy){
   while(rsvg.firstChild) rsvg.removeChild(rsvg.firstChild);
@@ -633,6 +756,7 @@ function renderTiles(cx,cy){
 
 function sizeFor(m){
   var z=view.z;
+  if(m.sq){ var q2=z<10?9:(z<12?11:(z<14?14:(z<16?17:(z<17?21:25)))); return [q2,q2]; }
   if(m.kind==='t'){ var w=z<11?20:(z<13?26:(z<15?36:(z<17?44:50))); return [w, w*m.h/m.w]; }
   if(m.kind==='s'){ var s=z<17?14:(z<18?18:22); return [s*0.55, s]; }
   if(m.kind==='m'){ var q=z<16.5?18:(z<17.5?22:26); return [q, q]; }
@@ -674,6 +798,7 @@ function render(){
     m.el.style.display='block';
     m.el.style.transform='translate('+x+'px,'+y+'px)';
   });
+  drawZonas(cx,cy);
   drawRegla(cx,cy);
   var act=pinned||hoverMark; if(act && act.vis && tip.style.display==='block'){ tip.innerHTML=tipHtml(act,pinned===act); placeTip(act); }
 }
