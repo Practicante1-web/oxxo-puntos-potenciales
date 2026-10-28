@@ -42,6 +42,19 @@ from utils import (
     tiendas_cercanas,
 )
 from mapa_html import construir_html_mapa
+from zonas import (
+    SIN_ASIGNAR,
+    buscar_direccion,
+    colores_por_grupo,
+    leer_jefes_regionales,
+    interpretar_zona,
+    leer_zonas_kml,
+    responsables_probables,
+    texto_especialista,
+    tiendas_mas_cercanas,
+    unir_jefes_a_tiendas,
+    zonas_de_punto,
+)
 
 METADATA_PATH = Path("data/metadata.json")
 RUTA_EXCEL_BUNDLED = Path("data/Puntos_potenciales.xlsx")
@@ -874,13 +887,72 @@ if sin_coords:
 # por cada fuente (para que no salga una sola gráfica gigante). Este
 # resumen vive SOLO en Módulo 1.
 # ---------------------------------------------------------------------------
+# Hoja 4 · Búsqueda de regional y jefes — archivos y funciones de apoyo
+# ---------------------------------------------------------------------------
+_CARPETA_APP = Path(__file__).resolve().parent
+
+
+def _ruta_archivo(nombres):
+    """Primer archivo que exista (en la carpeta de la app o en data/) con alguno de esos nombres."""
+    for carpeta in (_CARPETA_APP, _CARPETA_APP / "data", Path("."), Path("data")):
+        for n in nombres:
+            p = carpeta / n
+            if p.exists():
+                return p
+    return None
+
+
+@st.cache_data(show_spinner=False)
+def _cargar_jefes(ruta: str, firma: float):
+    return leer_jefes_regionales(ruta)
+
+
+@st.cache_data(show_spinner=False)
+def _cargar_zonas(ruta: str, firma: float):
+    return leer_zonas_kml(ruta)
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _buscar_direccion_cacheado(texto: str, ciudad: str):
+    return buscar_direccion(texto, ciudad)
+
+
+def _zonas_con_lineas(zonas: list) -> list:
+    """
+    Deja cada zona lista para dibujar: se nombra por su UPZ/barrio, conserva el color que tiene en el
+    mapa de zonas de especialistas y lleva la línea de la tarjeta (mouse encima) con su especialista.
+    """
+    r = []
+    for z in zonas:
+        i = interpretar_zona(z)
+        z2 = dict(z)
+        z2["nombre"] = i["sitio"] or z.get("nombre", "Zona")
+        z2["lineas"] = [f"Especialista de la zona: {texto_especialista(z)}"]
+        r.append(z2)
+    return r
+
+
+def renderizar_mapa_regional(tiendas, grupos, zonas, resaltado, altura=640, centro=None, clave="mapa_regional"):
+    """Mapa solo con tiendas (abiertas, en expansión, firmadas, en obra, cerradas), coloreadas
+    por jefe de zona / regional (o por estado), con las zonas de especialistas y la búsqueda en rojo."""
+    html = construir_html_mapa(
+        pd.DataFrame(), {}, _COLORES_HEX_LEYENDA,
+        resaltados=[resaltado] if resaltado is not None else [],
+        tiendas=tiendas, centro=centro, altura=altura,
+        zonas=zonas or None, grupos_tiendas=grupos or None,
+    )
+    components.html(html, height=altura + 4, scrolling=False)
+
+
+# ---------------------------------------------------------------------------
 # Tres hojas (pestañas) para tener la información ordenada:
 #   1) Mapa y revisión de puntos  2) Resumen general  3) Duplicados
 # ---------------------------------------------------------------------------
-tab_mapa, tab_resumen, tab_dup = st.tabs([
+tab_mapa, tab_resumen, tab_dup, tab_regional = st.tabs([
     "🗺️ Mapa y revisión de puntos",
     "📊 Resumen general",
     "⚠️ Duplicados",
+    "🧭 Búsqueda de regional y jefes",
 ])
 
 # ===== HOJA 1 · Mapa y revisión de puntos ==================================
@@ -1052,6 +1124,13 @@ with tab_mapa:
         radio_cerca_m=300 if solo_cerca else None,
         centro=(resaltado_mapa[0], resaltado_mapa[1], 17 if solo_cerca else 16) if resaltado_mapa is not None else None,
     )
+    if solo_cerca and df_tiendas is not None and len(df_tiendas) and resaltado_mapa is not None:
+        if len(_solo_cerca(df_tiendas, resaltado_mapa[0], resaltado_mapa[1], 300)) == 0:
+            st.info(
+                "🏪 No hay tiendas OXXO a menos de 300 m de este punto. Para ver las tiendas "
+                "de toda la zona, elige **«Todo el mapa»** arriba del mapa.",
+                icon="ℹ️",
+            )
     st.caption(
         "Pasa el mouse sobre un pin o una tienda para ver su información "
         "(clic para dejar la tarjeta fija). Arriba del mapa eliges entre "
@@ -1339,6 +1418,248 @@ with tab_dup:
                 ],
                 key="mapa_duplicado_m1_seleccionado",
                 altura=480, mostrar_capas_vacias=False,
+            )
+
+# ===== HOJA 4 · Búsqueda de regional y jefes ================================
+with tab_regional:
+    st.subheader("🧭 Búsqueda de regional y jefes")
+    st.write(
+        "Escribe una **coordenada** o una **dirección** y el mapa te muestra **en qué zona cae** y "
+        "**quién es su especialista**, junto con el **jefe de zona** y el **regional** que atienden "
+        "las tiendas de alrededor. Aquí solo aparecen tiendas OXXO (abiertas, en expansión, "
+        "firmadas, en obra y cerradas)."
+    )
+
+    # ---- archivos (los que van en GitHub, o los que se carguen aquí mismo para probar) ----
+    _ruta_j = _ruta_archivo(["jefes_regionales.xlsx", "Jefes_regionales.xlsx"])
+    _ruta_z = _ruta_archivo(["zonas_especialistas.kml", "zonas_especialistas.kmz", "zonas.kml", "zonas.kmz"])
+
+    with st.expander("📁 Archivos de esta hoja (jefes y zonas)", expanded=False):
+        st.caption(
+            "Normalmente no tienes que hacer nada: los archivos `jefes_regionales.xlsx` y "
+            "`zonas_especialistas.kml` viajan con la app en GitHub. Si quieres probar con otros, "
+            "cárgalos aquí (solo duran mientras tengas esta pestaña abierta)."
+        )
+        _sub_j = st.file_uploader("Excel de jefes y regionales", type=["xlsx"], key="subir_jefes")
+        _sub_z = st.file_uploader("Zonas de especialistas (KML o KMZ de Google My Maps)", type=["kml", "kmz"], key="subir_zonas")
+
+    if _sub_j is not None:
+        df_jefes = leer_jefes_regionales(_sub_j.getvalue())
+        _origen_j = f"cargado ahora: {_sub_j.name}"
+    elif _ruta_j is not None:
+        df_jefes = _cargar_jefes(str(_ruta_j), _ruta_j.stat().st_mtime)
+        _origen_j = _ruta_j.name
+    else:
+        df_jefes = leer_jefes_regionales(b"")
+        _origen_j = ""
+
+    if _sub_z is not None:
+        _zonas_crudas = leer_zonas_kml(_sub_z.getvalue())
+        _origen_z = f"cargado ahora: {_sub_z.name}"
+    elif _ruta_z is not None:
+        _zonas_crudas = _cargar_zonas(str(_ruta_z), _ruta_z.stat().st_mtime)
+        _origen_z = _ruta_z.name
+    else:
+        _zonas_crudas = []
+        _origen_z = ""
+    zonas_especialistas = _zonas_con_lineas(_zonas_crudas)
+
+    if df_tiendas is None or not len(df_tiendas):
+        st.warning("Todavía no están cargadas las tiendas OXXO, por eso no se puede dibujar este mapa.", icon="⚠️")
+    else:
+        tiendas_jefes = unir_jefes_a_tiendas(df_tiendas, df_jefes)
+        _n_con = int((tiendas_jefes["jefe_zona"] != SIN_ASIGNAR).sum())
+
+        if df_jefes.empty:
+            st.warning(
+                "No encontré el Excel de jefes y regionales (`jefes_regionales.xlsx`). "
+                "Súbelo a GitHub junto a `app.py`, o cárgalo en «Archivos de esta hoja».",
+                icon="⚠️",
+            )
+        else:
+            st.caption(
+                f"👥 {_n_con} de {len(tiendas_jefes)} tiendas tienen jefe de zona y regional asignados "
+                f"({_origen_j}). Las demás (por ejemplo cerradas o que todavía no abren) salen como «{SIN_ASIGNAR}»."
+            )
+        if not zonas_especialistas:
+            st.info(
+                "🧩 Todavía no hay zonas de especialistas cargadas. Exporta tu mapa de Google My Maps "
+                "como KML (⋮ junto al nombre del mapa → «Exportar a KML/KMZ») y súbelo a GitHub con el nombre "
+                "`zonas_especialistas.kml`, o cárgalo en «Archivos de esta hoja».",
+                icon="🧩",
+            )
+        else:
+            st.caption(f"🧩 {len(zonas_especialistas)} zonas de especialistas cargadas ({_origen_z}).")
+
+        # ---- búsqueda ----
+        modo_reg = st.radio("¿Cómo quieres buscar?", ["Por coordenada", "Por dirección"], horizontal=True, key="modo_busqueda_regional")
+        if modo_reg == "Por coordenada":
+            c_txt, c_btn = st.columns([5, 1], vertical_alignment="bottom")
+            _coord_txt = c_txt.text_input(
+                "Coordenada completa (latitud, longitud)", key="coord_regional",
+                placeholder="Ej. 4.697539545568918, -74.09220071349365",
+            )
+            if c_btn.button("🔍 Buscar", type="primary", key="buscar_coord_regional", use_container_width=True):
+                _c = parsear_coordenada_pegada(_coord_txt)
+                if _c is None:
+                    st.session_state["error_regional"] = "Eso no tiene forma de coordenada. Debe verse así: 4.697539545568918, -74.09220071349365"
+                    st.session_state.pop("busqueda_regional", None)
+                else:
+                    st.session_state["error_regional"] = ""
+                    st.session_state["busqueda_regional"] = {
+                        "lat": _c[0], "lon": _c[1], "etiqueta": f"Coordenada {_c[0]:.5f}, {_c[1]:.5f}",
+                    }
+        else:
+            c_dir, c_ciu, c_btn2 = st.columns([4, 2, 1], vertical_alignment="bottom")
+            _dir_txt = c_dir.text_input("Dirección", key="dir_regional", placeholder="Ej. Calle 80 # 69-50")
+            _ciu_txt = c_ciu.text_input("Ciudad", key="ciudad_regional", placeholder="Ej. Bogotá")
+            if c_btn2.button("🔍 Buscar", type="primary", key="buscar_dir_regional", use_container_width=True):
+                _res, _err = _buscar_direccion_cacheado(_dir_txt, _ciu_txt)
+                st.session_state["error_regional"] = _err
+                st.session_state["opciones_dir_regional"] = _res
+                st.session_state.pop("busqueda_regional", None)
+                if _res:
+                    st.session_state["busqueda_regional"] = {
+                        "lat": _res[0]["lat"], "lon": _res[0]["lon"], "etiqueta": _dir_txt.strip() or "Dirección",
+                        "detalle": _res[0]["nombre"],
+                    }
+            _opc = st.session_state.get("opciones_dir_regional") or []
+            if len(_opc) > 1:
+                _et = [f"{i + 1}. {o['nombre']}" for i, o in enumerate(_opc)]
+                _sel = st.selectbox("Encontré varias direcciones parecidas, elige la correcta:", _et, key="sel_dir_regional")
+                _o = _opc[_et.index(_sel)]
+                st.session_state["busqueda_regional"] = {
+                    "lat": _o["lat"], "lon": _o["lon"], "etiqueta": (_dir_txt.strip() or "Dirección"), "detalle": _o["nombre"],
+                }
+            st.caption(
+                "La dirección se busca en OpenStreetMap. Si no sale o queda mal ubicada, "
+                "agrega la ciudad o pega la coordenada de Google Maps."
+            )
+        if st.session_state.get("error_regional"):
+            st.error(st.session_state["error_regional"])
+        busq = st.session_state.get("busqueda_regional")
+
+        c_ver, c_quitar = st.columns([4, 1], vertical_alignment="bottom")
+        _vista_reg = c_ver.radio(
+            "Pintar las tiendas por:", ["Regional", "Jefe de zona", "Estado de la tienda"],
+            horizontal=True, key="pintar_regional",
+        )
+        if busq is not None and c_quitar.button("✖ Quitar la búsqueda", key="quitar_regional"):
+            for _k in ("busqueda_regional", "opciones_dir_regional", "error_regional"):
+                st.session_state.pop(_k, None)
+            st.rerun()
+
+        # ---- datos para el mapa ----
+        t_mapa = tiendas_jefes.copy()
+        extra = (
+            "Jefe de zona: " + t_mapa["jefe_zona"] + "\nRegional: " + t_mapa["regional"]
+            + "\nRegión: " + t_mapa["region"] + " · Plaza: " + t_mapa["plaza"]
+        )
+        t_mapa["detalle"] = extra + "\n" + t_mapa["detalle"].astype(str)
+        grupos_mapa = None
+        if _vista_reg == "Regional":
+            t_mapa["grupo"] = t_mapa["regional"]
+            grupos_mapa = colores_por_grupo(t_mapa["grupo"])
+        elif _vista_reg == "Jefe de zona":
+            t_mapa["grupo"] = t_mapa["jefe_zona"]
+            grupos_mapa = colores_por_grupo(t_mapa["grupo"])
+
+        resaltado_reg = None
+        if busq is not None:
+            _info = []
+            if busq.get("detalle"):
+                _info.append(busq["detalle"])
+            _info.append(f"Coordenada: {busq['lat']:.6f}, {busq['lon']:.6f}")
+            resaltado_reg = (busq["lat"], busq["lon"], busq["etiqueta"], "\n".join(_info))
+
+        if _vista_reg != "Estado de la tienda":
+            st.caption("Punto lleno = tienda abierta, en expansión, firmada o en obra · anillo (centro blanco) = tienda cerrada.")
+        renderizar_mapa_regional(
+            t_mapa, grupos_mapa, zonas_especialistas, resaltado_reg, altura=660,
+            centro=(busq["lat"], busq["lon"], 15) if busq is not None else None,
+        )
+        st.caption(
+            "Pasa el mouse sobre una tienda para ver su jefe, su regional y su ficha; sobre una zona "
+            "para ver su especialista. Arriba del mapa prendes o apagas cada jefe, regional o las zonas."
+        )
+        if zonas_especialistas:
+            _por_esp = {}
+            for _z in zonas_especialistas:
+                _por_esp.setdefault(texto_especialista(_z), []).append(_z.get("color", "#999"))
+            _por_esp = {n: max(set(cs), key=cs.count) for n, cs in _por_esp.items()}
+            st.markdown(
+                "**Colores de las zonas, por especialista:** "
+                + " &nbsp; ".join(
+                    f'<span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:{c};'
+                    f'margin-right:4px;vertical-align:-1px"></span>{n}'
+                    for n, c in sorted(_por_esp.items(), key=lambda x: x[0])
+                ),
+                unsafe_allow_html=True,
+            )
+
+        # ---- resultado de la búsqueda ----
+        if busq is not None:
+            lat_b, lon_b = busq["lat"], busq["lon"]
+            st.markdown(f"##### Resultado para: {busq['etiqueta']}")
+            if busq.get("detalle"):
+                st.caption(f"📍 Dirección encontrada: {busq['detalle']}")
+
+            col_z, col_r = st.columns(2)
+            with col_z:
+                st.markdown("**🧩 Zona y especialista**")
+                if not zonas_especialistas:
+                    st.info("Aún no hay zonas cargadas (ver el aviso de arriba).")
+                else:
+                    _en = zonas_de_punto(zonas_especialistas, lat_b, lon_b)
+                    if not _en:
+                        st.warning("Este punto no cae dentro de ninguna zona dibujada en el mapa de especialistas.", icon="⚠️")
+                    for _z in _en:
+                        _i = interpretar_zona(_z)
+                        st.success(
+                            f"Zona (UPZ): **{_i['sitio'] or _z['nombre']}**\n\n"
+                            f"Especialista de la zona: **{texto_especialista(_z)}**",
+                            icon="✅",
+                        )
+
+            cerca6 = tiendas_mas_cercanas(tiendas_jefes, lat_b, lon_b, 6)
+            prob = responsables_probables(cerca6)
+            with col_r:
+                st.markdown("**👥 Jefe de zona y regional**")
+                if not prob:
+                    st.info("Ninguna de las tiendas más cercanas tiene jefe de zona asignado.")
+                else:
+                    st.success(
+                        f"Jefe de zona: **{prob['jefe_zona']}**\n\nRegional: **{prob['regional']}**\n\n"
+                        f"Región: {prob['region']} · Plaza: {prob['plaza']}",
+                        icon="✅",
+                    )
+                    st.caption(
+                        f"Se toma de la tienda más cercana con jefe asignado: {prob['tienda']} "
+                        f"(CR {prob['cr']}), a {prob['distancia_m']:.0f} m."
+                    )
+                    if prob["hay_mas_de_un_jefe"]:
+                        st.warning(
+                            "Ojo: entre las tiendas cercanas hay más de un jefe de zona ("
+                            + ", ".join(prob["jefes_cercanos"]) + "). El punto queda en un límite entre zonas; "
+                            "confírmalo con el regional.", icon="⚠️",
+                        )
+
+            st.markdown("**🏪 Tiendas más cercanas**")
+            st.dataframe(
+                pd.DataFrame({
+                    "Tienda": cerca6["nombre"].replace("", "—").values,
+                    "CR": cerca6["cr"].replace("", "—").values,
+                    "Estado": cerca6["estado_tienda"].values,
+                    "Distancia": [f"{d:.0f} m" if d < 1000 else f"{d / 1000:.1f} km" for d in cerca6["distancia_m"]],
+                    "Jefe de zona": cerca6["jefe_zona"].values,
+                    "Regional": cerca6["regional"].values,
+                    "Región": cerca6["region"].values,
+                }),
+                use_container_width=True, hide_index=True,
+            )
+            st.caption(
+                "El jefe de zona y el regional salen de las tiendas de alrededor (el Excel asigna jefes "
+                "por tienda, no por territorio dibujado). La zona y el especialista salen del mapa de zonas."
             )
 
 st.divider()
