@@ -1671,8 +1671,6 @@ def parsear_tiendas(crudo: pd.DataFrame) -> pd.DataFrame:
             if pd.notna(n_cm2[i]) and n_cm2[i] > 0:
                 linea_r += f" · {_pesos(n_cm2[i])} por m²"
             L.append(linea_r)
-        if pd.notna(n_tra[i]) and n_tra[i] != 0:
-            L.append(f"Tráfico último mes: {fmt(n_tra[i])}" + (f" · prom. 6 meses: {fmt(n_tra6[i])}" if pd.notna(n_tra6[i]) else ""))
         if pd.notna(n_tic[i]) and n_tic[i] != 0:
             L.append(f"Ticket último mes: {fmt(n_tic[i])}" + (f" · prom. 6 meses: {fmt(n_tic6[i])}" if pd.notna(n_tic6[i]) else ""))
         if pd.notna(n_scf[i]) or pd.notna(n_sc[i]):
