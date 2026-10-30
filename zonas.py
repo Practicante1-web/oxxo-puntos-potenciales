@@ -417,12 +417,14 @@ def texto_especialista(zona: dict) -> str:
 # ---------------------------------------------------------------------------
 def buscar_direccion(texto: str, ciudad: str = "") -> tuple:
     """
-    Convierte una dirección en coordenadas. Devuelve (resultados, error), donde
-    resultados es una lista de {nombre, lat, lon}. Usa Nominatim (uso ligero y
-    gratuito); si la dirección tiene un formato muy colombiano (Cra 45A #34-155)
-    y no aparece, conviene agregar la ciudad o pegar la coordenada de Google Maps.
+    Convierte una dirección en coordenadas con OpenStreetMap (Nominatim, gratis y sin llave).
+    Devuelve (resultados, error); resultados es una lista de {nombre, lat, lon}.
+    Prueba varias formas de escribir la dirección (abreviaturas «Cra», «Cl», «#»…) porque este
+    buscador es más sensible al formato que el de Google. Si no aparece, conviene agregar la
+    ciudad o usar Google (ver `buscar_direccion_google`).
     """
     import requests
+    from utils import _variantes_direccion
 
     consulta = " ".join(x for x in (_limpio(texto), _limpio(ciudad)) if x)
     if not consulta:
@@ -438,21 +440,155 @@ def buscar_direccion(texto: str, ciudad: str = "") -> tuple:
         r.raise_for_status()
         return r.json()
 
+    datos = []
     try:
-        datos = pedir(consulta)
-        if not datos:
-            # Segundo intento: sin el número de la placa («#34-155») ni el local.
-            simple = re.split(r"#|no\.?\s*\d|local|lc\b|bodega|piso", consulta, flags=re.I)[0].strip(" ,-")
-            if simple and simple != consulta:
-                datos = pedir(simple + (" " + ciudad if ciudad and ciudad.lower() not in simple.lower() else ""))
+        intentos = list(_variantes_direccion(consulta))
+        # Último intento: sin el número de la placa («#34-155») ni el local.
+        simple = re.split(r"#|no\.?\s*\d|local|lc\b|bodega|piso", consulta, flags=re.I)[0].strip(" ,-")
+        if simple and simple != consulta:
+            intentos.append(simple)
+        for q in intentos:
+            datos = pedir(q)
+            if datos:
+                break
     except Exception as e:      # sin internet, límite de uso, etc.
         return [], f"No pude consultar el buscador de direcciones ({type(e).__name__}). Pega la coordenada de Google Maps."
     res = []
     for d in datos or []:
         try:
-            res.append({"nombre": str(d.get("display_name", ""))[:140], "lat": float(d["lat"]), "lon": float(d["lon"])})
+            res.append({"nombre": str(d.get("display_name", ""))[:140], "lat": float(d["lat"]), "lon": float(d["lon"]), "fuente": "OpenStreetMap"})
         except (KeyError, ValueError, TypeError):
             continue
     if not res:
         return [], "No encontré esa dirección. Prueba agregando la ciudad, o pega la coordenada de Google Maps."
     return res, ""
+
+
+def buscar_direccion_google(texto: str, ciudad: str = "", api_key: str = "") -> tuple:
+    """
+    Convierte una dirección en coordenadas con la API de Geocodificación de Google (la misma
+    precisión del buscador de Google Maps). Necesita una llave (GOOGLE_MAPS_API_KEY en los
+    Secrets de Streamlit). Devuelve (resultados, error) como `buscar_direccion`.
+    """
+    import requests
+
+    consulta = " ".join(x for x in (_limpio(texto), _limpio(ciudad)) if x)
+    if not consulta:
+        return [], "Escribe una dirección."
+    if not api_key:
+        return [], "Falta la llave de Google (GOOGLE_MAPS_API_KEY)."
+    try:
+        r = requests.get(
+            "https://maps.googleapis.com/maps/api/geocode/json",
+            params={"address": consulta, "components": "country:CO", "language": "es", "region": "co", "key": api_key},
+            timeout=15,
+        )
+        r.raise_for_status()
+        j = r.json()
+    except Exception as e:
+        return [], f"No pude consultar Google ({type(e).__name__})."
+    estado = j.get("status", "")
+    if estado == "ZERO_RESULTS":
+        return [], "Google no encontró esa dirección."
+    if estado != "OK":
+        return [], f"Google respondió «{estado}»: {j.get('error_message', 'revisa la llave y que la API de Geocodificación esté activa')}."
+    res = []
+    for d in j.get("results", [])[:5]:
+        try:
+            loc = d["geometry"]["location"]
+            tipo = d["geometry"].get("location_type", "")
+            res.append({
+                "nombre": str(d.get("formatted_address", ""))[:140], "lat": float(loc["lat"]), "lon": float(loc["lng"]),
+                "fuente": "Google", "precision": tipo,
+            })
+        except (KeyError, ValueError, TypeError):
+            continue
+    if not res:
+        return [], "Google no encontró esa dirección."
+    return res, ""
+
+
+def buscar_direccion_auto(texto: str, ciudad: str = "", api_key: str = "") -> tuple:
+    """Google si hay llave (y encuentra algo); si no, OpenStreetMap. Devuelve (resultados, error)."""
+    if api_key:
+        res, err = buscar_direccion_google(texto, ciudad, api_key)
+        if res:
+            return res, ""
+        res2, err2 = buscar_direccion(texto, ciudad)
+        if res2:
+            return res2, ""
+        return [], err or err2
+    return buscar_direccion(texto, ciudad)
+
+
+# ---------------------------------------------------------------------------
+# ¿Quién tiene cada punto? (especialista por zona + jefe de zona por tienda cercana)
+# ---------------------------------------------------------------------------
+def asignar_responsables_a_puntos(puntos: pd.DataFrame, zonas: list, tiendas_jefes: pd.DataFrame, max_m: float = 5000.0) -> pd.DataFrame:
+    """
+    Para cada punto con coordenadas devuelve, con el mismo índice:
+      zona, especialista_zona  → la zona del mapa de especialistas donde cae (si cae en alguna),
+      jefe_zona, regional, region → los de la tienda más cercana que tenga jefe asignado
+                                    (si está a `max_m` metros o menos),
+      tienda_ref, dist_tienda_m → esa tienda y su distancia.
+    Lo que no se puede determinar queda como «Sin asignar».
+    """
+    import numpy as np
+
+    salida = pd.DataFrame(index=puntos.index)
+    n = len(puntos)
+    zona = np.array([SIN_ASIGNAR] * n, dtype=object)
+    esp = np.array([SIN_ASIGNAR] * n, dtype=object)
+    jefe = np.array([SIN_ASIGNAR] * n, dtype=object)
+    regional = np.array([SIN_ASIGNAR] * n, dtype=object)
+    region = np.array([SIN_ASIGNAR] * n, dtype=object)
+    ref = np.array([""] * n, dtype=object)
+    dist_ref = np.full(n, np.nan)
+
+    la = pd.to_numeric(puntos["latitud"], errors="coerce").to_numpy(dtype=float)
+    lo = pd.to_numeric(puntos["longitud"], errors="coerce").to_numpy(dtype=float)
+    valido = ~(np.isnan(la) | np.isnan(lo))
+
+    # --- zona / especialista: caja envolvente primero, polígono después ---
+    cajas = []
+    for z in zonas or []:
+        pts = [p for a in z["anillos"] for p in a]
+        if not pts:
+            continue
+        lats = [p[0] for p in pts]
+        lons = [p[1] for p in pts]
+        cajas.append((z, min(lats), max(lats), min(lons), max(lons)))
+    if cajas:
+        for i in np.flatnonzero(valido):
+            for z, y0, y1, x0, x1 in cajas:
+                if y0 <= la[i] <= y1 and x0 <= lo[i] <= x1 and zonas_de_punto([z], la[i], lo[i]):
+                    inf = interpretar_zona(z)
+                    zona[i] = inf["sitio"] or z.get("nombre", "Zona")
+                    esp[i] = texto_especialista(z) or SIN_ASIGNAR
+                    break
+
+    # --- jefe de zona: tienda más cercana con jefe asignado ---
+    if tiendas_jefes is not None and not tiendas_jefes.empty:
+        t = tiendas_jefes[tiendas_jefes["jefe_zona"] != SIN_ASIGNAR].copy()
+        t["latitud"] = pd.to_numeric(t["latitud"], errors="coerce")
+        t["longitud"] = pd.to_numeric(t["longitud"], errors="coerce")
+        t = t.dropna(subset=["latitud", "longitud"]).reset_index(drop=True)
+        if not t.empty:
+            tla = np.radians(t["latitud"].to_numpy(dtype=float))
+            tlo = np.radians(t["longitud"].to_numpy(dtype=float))
+            for i in np.flatnonzero(valido):
+                p1, l1 = math.radians(la[i]), math.radians(lo[i])
+                a = np.sin((tla - p1) / 2) ** 2 + np.cos(p1) * np.cos(tla) * np.sin((tlo - l1) / 2) ** 2
+                d = 2 * 6371000.0 * np.arcsin(np.sqrt(a))
+                k = int(np.argmin(d))
+                if d[k] <= max_m:
+                    jefe[i] = t.at[k, "jefe_zona"]
+                    regional[i] = t.at[k, "regional"]
+                    region[i] = t.at[k, "region"]
+                    ref[i] = str(t.at[k, "nombre"])
+                    dist_ref[i] = d[k]
+
+    salida["zona"], salida["especialista_zona"] = zona, esp
+    salida["jefe_zona"], salida["regional"], salida["region"] = jefe, regional, region
+    salida["tienda_ref"], salida["dist_tienda_m"] = ref, dist_ref
+    return salida
