@@ -46,8 +46,6 @@ from mapa_html import construir_html_mapa
 from zonas import (
     SIN_ASIGNAR,
     asignar_responsables_a_puntos,
-    buscar_direccion,
-    buscar_direccion_auto,
     colores_por_grupo,
     leer_jefes_regionales,
     interpretar_zona,
@@ -938,20 +936,6 @@ def _cargar_zonas(ruta: str, firma: float):
     return leer_zonas_kml(ruta)
 
 
-def _llave_google() -> str:
-    """Llave de Google (Secrets de Streamlit: GOOGLE_MAPS_API_KEY). Vacía si no está configurada."""
-    try:
-        return str(st.secrets.get("GOOGLE_MAPS_API_KEY", "") or "").strip()
-    except Exception:
-        return ""
-
-
-@st.cache_data(show_spinner="Buscando la dirección...", ttl=3600)
-def _buscar_direccion_cacheado(texto: str, ciudad: str, llave: str = ""):
-    """Dirección -> coordenada. Con llave de Google usa Google; sin ella, OpenStreetMap."""
-    return buscar_direccion_auto(texto, ciudad, llave)
-
-
 def _zonas_con_lineas(zonas: list) -> list:
     """
     Deja cada zona lista para dibujar: se nombra por su UPZ/barrio, conserva el color que tiene en el
@@ -1010,7 +994,7 @@ with tab_mapa:
         "otra fuente y si hay **tiendas OXXO cerca**."
     )
     st.markdown(
-        "1. **Busca el punto** por nombre, por **dirección** (te da la coordenada al instante) o por coordenada.\n"
+        "1. **Busca el punto** por nombre o por coordenada.\n"
         "2. **Mira el mapa:** el punto buscado aparece en **rojo**, junto a los puntos "
         "potenciales (Especialistas, Localizadores, Terceros, Operación e Inmobiliarias) y a "
         "las tiendas OXXO (abiertas, en expansión, firmadas, en obra y cerradas) que tiene alrededor.\n"
@@ -1019,12 +1003,12 @@ with tab_mapa:
     )
 
     def _limpiar_busqueda_mapa():
-        for _k in ("resultado_busqueda_nombre", "resultado_busqueda_punto", "error_busqueda_punto", "sel_nombre_mapa_unico", "opciones_dir_mapa", "error_dir_mapa"):
+        for _k in ("resultado_busqueda_nombre", "resultado_busqueda_punto", "error_busqueda_punto", "sel_nombre_mapa_unico"):
             st.session_state.pop(_k, None)
 
     modo_busqueda = st.radio(
         "¿Cómo quieres buscar?",
-        ["Por nombre", "Por dirección", "Por coordenada"],
+        ["Por nombre", "Por coordenada"],
         horizontal=True,
         key="modo_busqueda_mapa_unico",
     )
@@ -1105,45 +1089,6 @@ with tab_mapa:
                             f"\nCiudad: {_v(_f.ciudad)}"
                         ),
                     }
-
-    elif modo_busqueda == "Por dirección":
-        # Escribes la dirección tal cual la tienes y la app te devuelve la coordenada, sin salir de
-        # esta página. Con llave de Google (Secrets: GOOGLE_MAPS_API_KEY) usa Google; sin ella, OpenStreetMap.
-        _usa_google = bool(_llave_google())
-        c_dir_m, c_ciu_m, c_btn_m = st.columns([4, 2, 1], vertical_alignment="bottom")
-        _dir_m = c_dir_m.text_input("Dirección", key="dir_mapa_unico", placeholder="Ej. Calle 80 # 69-50")
-        _ciu_m = c_ciu_m.text_input("Ciudad", key="ciudad_dir_mapa_unico", placeholder="Ej. Bogotá")
-        if c_btn_m.button("🔍 Buscar", type="primary", key="buscar_dir_mapa_unico", use_container_width=True):
-            _res_m, _err_m = _buscar_direccion_cacheado(_dir_m, _ciu_m, _llave_google())
-            st.session_state["opciones_dir_mapa"] = _res_m
-            st.session_state["error_dir_mapa"] = _err_m
-            st.session_state.pop("resultado_busqueda_punto", None)
-            if _res_m:
-                st.session_state["resultado_busqueda_punto"] = {
-                    "lat": _res_m[0]["lat"], "lon": _res_m[0]["lon"],
-                    "etiqueta": (_dir_m.strip() or "Dirección"),
-                    "info_extra": f"Dirección encontrada: {_res_m[0]['nombre']}\nCoordenada: {_res_m[0]['lat']:.6f}, {_res_m[0]['lon']:.6f}",
-                }
-        _opc_m = st.session_state.get("opciones_dir_mapa") or []
-        if len(_opc_m) > 1:
-            _et_m = [f"{i + 1}. {o['nombre']}" for i, o in enumerate(_opc_m)]
-            _sel_m = st.selectbox("Encontré varias direcciones parecidas, elige la correcta:", _et_m, key="sel_dir_mapa_unico")
-            _o_m = _opc_m[_et_m.index(_sel_m)]
-            st.session_state["resultado_busqueda_punto"] = {
-                "lat": _o_m["lat"], "lon": _o_m["lon"], "etiqueta": (_dir_m.strip() or "Dirección"),
-                "info_extra": f"Dirección encontrada: {_o_m['nombre']}\nCoordenada: {_o_m['lat']:.6f}, {_o_m['lon']:.6f}",
-            }
-        if st.session_state.get("error_dir_mapa"):
-            st.error(st.session_state["error_dir_mapa"])
-        consulta_punto = st.session_state.get("resultado_busqueda_punto")
-        if consulta_punto is not None:
-            st.markdown("**Coordenada de esa dirección** (copia con el ícono de la derecha y pégala en el book):")
-            st.code(f"{consulta_punto['lat']:.6f}, {consulta_punto['lon']:.6f}", language=None)
-        st.caption(
-            "📍 Buscando con " + ("Google (misma precisión que Google Maps)." if _usa_google else
-            "OpenStreetMap. Para que busque con Google, configura GOOGLE_MAPS_API_KEY en los Secrets de la app.")
-            + " Antes de usar la coordenada, mira que el punto rojo caiga donde debe en el mapa de abajo."
-        )
 
     else:  # Por coordenada
         col_texto, col_boton = st.columns([5, 1], vertical_alignment="bottom")
@@ -1453,7 +1398,7 @@ with tab_dup:
 with tab_regional:
     st.subheader("🧭 Búsqueda de regional y jefes")
     st.write(
-        "Escribe una **coordenada** o una **dirección** y el mapa te muestra **en qué zona cae** y "
+        "Escribe una **coordenada** y el mapa te muestra **en qué zona cae** y "
         "**quién es su especialista**, junto con el **jefe de zona** y el **regional** que atienden "
         "las tiendas de alrededor. Aquí solo aparecen tiendas OXXO (abiertas, en expansión, "
         "firmadas, en obra y cerradas)."
@@ -1521,49 +1466,21 @@ with tab_regional:
             st.caption(f"🧩 {len(zonas_especialistas)} zonas de especialistas cargadas ({_origen_z}).")
 
         # ---- búsqueda ----
-        modo_reg = st.radio("¿Cómo quieres buscar?", ["Por coordenada", "Por dirección"], horizontal=True, key="modo_busqueda_regional")
-        if modo_reg == "Por coordenada":
-            c_txt, c_btn = st.columns([5, 1], vertical_alignment="bottom")
-            _coord_txt = c_txt.text_input(
-                "Coordenada completa (latitud, longitud)", key="coord_regional",
-                placeholder="Ej. 4.697539545568918, -74.09220071349365",
-            )
-            if c_btn.button("🔍 Buscar", type="primary", key="buscar_coord_regional", use_container_width=True):
-                _c = parsear_coordenada_pegada(_coord_txt)
-                if _c is None:
-                    st.session_state["error_regional"] = "Eso no tiene forma de coordenada. Debe verse así: 4.697539545568918, -74.09220071349365"
-                    st.session_state.pop("busqueda_regional", None)
-                else:
-                    st.session_state["error_regional"] = ""
-                    st.session_state["busqueda_regional"] = {
-                        "lat": _c[0], "lon": _c[1], "etiqueta": f"Coordenada {_c[0]:.5f}, {_c[1]:.5f}",
-                    }
-        else:
-            c_dir, c_ciu, c_btn2 = st.columns([4, 2, 1], vertical_alignment="bottom")
-            _dir_txt = c_dir.text_input("Dirección", key="dir_regional", placeholder="Ej. Calle 80 # 69-50")
-            _ciu_txt = c_ciu.text_input("Ciudad", key="ciudad_regional", placeholder="Ej. Bogotá")
-            if c_btn2.button("🔍 Buscar", type="primary", key="buscar_dir_regional", use_container_width=True):
-                _res, _err = _buscar_direccion_cacheado(_dir_txt, _ciu_txt, _llave_google())
-                st.session_state["error_regional"] = _err
-                st.session_state["opciones_dir_regional"] = _res
+        c_txt, c_btn = st.columns([5, 1], vertical_alignment="bottom")
+        _coord_txt = c_txt.text_input(
+            "Coordenada completa (latitud, longitud)", key="coord_regional",
+            placeholder="Ej. 4.697539545568918, -74.09220071349365",
+        )
+        if c_btn.button("🔍 Buscar", type="primary", key="buscar_coord_regional", use_container_width=True):
+            _c = parsear_coordenada_pegada(_coord_txt)
+            if _c is None:
+                st.session_state["error_regional"] = "Eso no tiene forma de coordenada. Debe verse así: 4.697539545568918, -74.09220071349365"
                 st.session_state.pop("busqueda_regional", None)
-                if _res:
-                    st.session_state["busqueda_regional"] = {
-                        "lat": _res[0]["lat"], "lon": _res[0]["lon"], "etiqueta": _dir_txt.strip() or "Dirección",
-                        "detalle": _res[0]["nombre"],
-                    }
-            _opc = st.session_state.get("opciones_dir_regional") or []
-            if len(_opc) > 1:
-                _et = [f"{i + 1}. {o['nombre']}" for i, o in enumerate(_opc)]
-                _sel = st.selectbox("Encontré varias direcciones parecidas, elige la correcta:", _et, key="sel_dir_regional")
-                _o = _opc[_et.index(_sel)]
+            else:
+                st.session_state["error_regional"] = ""
                 st.session_state["busqueda_regional"] = {
-                    "lat": _o["lat"], "lon": _o["lon"], "etiqueta": (_dir_txt.strip() or "Dirección"), "detalle": _o["nombre"],
+                    "lat": _c[0], "lon": _c[1], "etiqueta": f"Coordenada {_c[0]:.5f}, {_c[1]:.5f}",
                 }
-            st.caption(
-                "La dirección se busca en OpenStreetMap. Si no sale o queda mal ubicada, "
-                "agrega la ciudad o pega la coordenada de Google Maps."
-            )
         if st.session_state.get("error_regional"):
             st.error(st.session_state["error_regional"])
         busq = st.session_state.get("busqueda_regional")
@@ -1574,7 +1491,7 @@ with tab_regional:
             horizontal=True, key="pintar_regional",
         )
         if busq is not None and c_quitar.button("✖ Quitar la búsqueda", key="quitar_regional"):
-            for _k in ("busqueda_regional", "opciones_dir_regional", "error_regional"):
+            for _k in ("busqueda_regional", "error_regional"):
                 st.session_state.pop(_k, None)
             st.rerun()
 
@@ -1630,8 +1547,6 @@ with tab_regional:
         if busq is not None:
             lat_b, lon_b = busq["lat"], busq["lon"]
             st.markdown(f"##### Resultado para: {busq['etiqueta']}")
-            if busq.get("detalle"):
-                st.caption(f"📍 Dirección encontrada: {busq['detalle']}")
 
             col_z, col_r = st.columns(2)
             with col_z:
@@ -1693,23 +1608,31 @@ with tab_regional:
 
 # ===== HOJA 3 · Resumen general ============================================
 # Va después del código de la hoja de regionales porque usa sus zonas y jefes.
-@st.cache_data(show_spinner="Calculando quién tiene cada punto...", ttl=TTL_CACHE_DATOS)
-def _asignaciones_cacheado(puntos: pd.DataFrame, firma: str, _zonas, _tiendas_jefes):
-    """Zona/especialista y jefe de zona de cada punto (la `firma` hace que se recalcule si cambian los archivos)."""
-    return asignar_responsables_a_puntos(puntos, _zonas, _tiendas_jefes)
+_ESTADOS_TIENDA_ORDEN = ["Abierta", "Expansión", "Firmada", "Obra", "Cerrada"]
+_ETIQUETA_ESTADO_TIENDA = {
+    "Abierta": "Abiertas", "Expansión": "En expansión", "Firmada": "Firmadas", "Obra": "En obra", "Cerrada": "Cerradas",
+}
+_COLOR_ESTADO_TIENDA = {
+    "Abiertas": "#27AE60", "En expansión": "#1955DC", "Firmadas": "#E67E22", "En obra": "#8E6B3E", "Cerradas": "#9AA0A8",
+}
 
 
-def _barras_horizontales(datos: pd.DataFrame, categoria: str, valor: str, titulo_cat: str, color: str, top: int = 10, sin_asignar_gris: bool = True):
-    """Barras horizontales ordenadas, con el número al final de cada barra. Una sola tonalidad; 'Sin asignar' en gris."""
+@st.cache_data(show_spinner="Ubicando las tiendas en las zonas de especialistas...", ttl=TTL_CACHE_DATOS)
+def _zonas_de_tiendas_cacheado(coordenadas: pd.DataFrame, firma: str, _zonas):
+    """Especialista de la zona dibujada donde cae cada tienda (la `firma` recalcula si cambian los archivos)."""
+    return asignar_responsables_a_puntos(coordenadas, _zonas, None)
+
+
+def _barras_horizontales(datos: pd.DataFrame, categoria: str, valor: str, titulo_cat: str, color: str, top: int = 10):
+    """Barras horizontales ordenadas, con el número al final de cada barra (una sola tonalidad)."""
     d = datos.head(top).copy()
-    d["_color"] = d[categoria].map(lambda x: "#B8BCC4" if (sin_asignar_gris and str(x) in (SIN_ASIGNAR, "Sin asignar", "Sin dato")) else color)
     base = alt.Chart(d).encode(
         y=alt.Y(f"{categoria}:N", title=None, sort="-x", axis=alt.Axis(labelLimit=220),
                 scale=alt.Scale(paddingInner=0.3, paddingOuter=0.2)),
         x=alt.X(f"{valor}:Q", title=None, axis=alt.Axis(tickMinStep=1, grid=True)),
-        tooltip=[alt.Tooltip(f"{categoria}:N", title=titulo_cat), alt.Tooltip(f"{valor}:Q", title="Puntos")],
+        tooltip=[alt.Tooltip(f"{categoria}:N", title=titulo_cat), alt.Tooltip(f"{valor}:Q", title="Cantidad")],
     )
-    barras = base.mark_bar(cornerRadiusEnd=4).encode(color=alt.Color("_color:N", scale=None, legend=None))
+    barras = base.mark_bar(cornerRadiusEnd=4, color=color)
     textos = base.mark_text(align="left", dx=4, color="#1A1A1A").encode(text=f"{valor}:Q")
     return (barras + textos).properties(height=max(110, 30 * len(d)))
 
@@ -1719,43 +1642,118 @@ def _conteo(serie: pd.Series, nombre: str, vacio: str = "Sin dato") -> pd.DataFr
     return s.value_counts().rename_axis(nombre).reset_index(name="Puntos")
 
 
+def _grafico_tiendas(t: pd.DataFrame, columna: str, titulo_cat: str, top: int = 12, excluir=("", SIN_ASIGNAR)):
+    """
+    Barras horizontales de tiendas por `columna` (regional, jefe, zona…), partidas por estado
+    (abiertas, en expansión, firmadas, en obra, cerradas). Devuelve (gráfico o None, tiendas que no entran).
+    """
+    d = t.copy()
+    d[columna] = d[columna].fillna("").astype(str).str.strip()
+    fuera = int(d[columna].isin(excluir).sum())
+    d = d[~d[columna].isin(excluir)]
+    if d.empty:
+        return None, fuera
+    totales = d.groupby(columna).size().sort_values(ascending=False).head(top)
+    d = d[d[columna].isin(totales.index)]
+    g = d.groupby([columna, "Estado"]).size().reset_index(name="Tiendas")
+    orden = list(totales.index)
+    tot_df = totales.rename_axis(columna).reset_index(name="Total")
+    barras = alt.Chart(g).mark_bar().encode(
+        y=alt.Y(f"{columna}:N", sort=orden, title=None, axis=alt.Axis(labelLimit=220),
+                scale=alt.Scale(paddingInner=0.3, paddingOuter=0.2)),
+        x=alt.X("Tiendas:Q", stack="zero", title=None, axis=alt.Axis(tickMinStep=1)),
+        color=alt.Color("Estado:N", title=None, legend=alt.Legend(orient="bottom"), scale=alt.Scale(
+            domain=list(_COLOR_ESTADO_TIENDA.keys()), range=list(_COLOR_ESTADO_TIENDA.values()))),
+        tooltip=[alt.Tooltip(f"{columna}:N", title=titulo_cat), alt.Tooltip("Estado:N"), alt.Tooltip("Tiendas:Q")],
+    )
+    textos = alt.Chart(tot_df).mark_text(align="left", dx=4, color="#1A1A1A").encode(
+        y=alt.Y(f"{columna}:N", sort=orden), x=alt.X("Total:Q"), text="Total:Q",
+    )
+    return (barras + textos).properties(height=max(120, 30 * len(totales) + 40)), fuera
+
+
 with tab_resumen:
     st.subheader("📊 Resumen general")
+
+    # =================== 1. TIENDAS OXXO ===================
+    st.markdown("### 1. Tiendas OXXO")
     st.caption(
-        "Todos los puntos potenciales (Especialistas, Operación, Terceros, Localizadores e Inmobiliaria): "
-        "cuántos hay, de dónde vienen, **qué especialista y qué jefe de zona los tiene** y cómo van en el tiempo."
+        "Tiendas abiertas, en expansión, firmadas, en obra y cerradas, según el book. "
+        "El jefe de zona y el regional salen del Excel de jefes; el especialista, del mapa de zonas."
     )
-
-    # --- quién tiene cada punto (zona de especialista + jefe de zona de la tienda más cercana) ---
-    _con_coord = df.dropna(subset=["latitud", "longitud"])
-    _firma_asig = f"{len(zonas_especialistas)}|{0 if tiendas_jefes is None else len(tiendas_jefes)}|{_origen_j}|{_origen_z}"
-    if tiendas_jefes is not None and len(_con_coord):
-        _asig = _asignaciones_cacheado(_con_coord[["latitud", "longitud"]], _firma_asig, zonas_especialistas, tiendas_jefes)
-        dfr = df.join(_asig)
+    if df_tiendas is None or not len(df_tiendas):
+        st.info("Todavía no están cargadas las tiendas OXXO, por eso no se pueden mostrar estas gráficas.", icon="ℹ️")
     else:
-        dfr = df.copy()
-    for _c in ("zona", "especialista_zona", "jefe_zona", "regional", "region"):
-        if _c not in dfr.columns:
-            dfr[_c] = SIN_ASIGNAR
-        dfr[_c] = dfr[_c].fillna(SIN_ASIGNAR)
-    if "tienda_ref" not in dfr.columns:
-        dfr["tienda_ref"], dfr["dist_tienda_m"] = "", float("nan")
-    dfr["fuente"] = dfr["fuente"].replace("", "Sin fuente")
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Puntos potenciales", f"{len(df):,}".replace(",", "."))
-    m2.metric("Con coordenada", f"{len(_con_coord):,}".replace(",", "."))
-    m3.metric("Dentro de una zona de especialista", f"{int((dfr['especialista_zona'] != SIN_ASIGNAR).sum()):,}".replace(",", "."))
-    m4.metric("Con jefe de zona asignado", f"{int((dfr['jefe_zona'] != SIN_ASIGNAR).sum()):,}".replace(",", "."))
-    if tiendas_jefes is None:
-        st.info(
-            "Todavía no están cargadas las tiendas con jefes, por eso no puedo decir qué jefe de zona tiene cada punto. "
-            "Cuando se carguen, aquí aparecen los especialistas y jefes.",
-            icon="ℹ️",
+        t_res = (tiendas_jefes if tiendas_jefes is not None else df_tiendas).copy()
+        for _c in ("jefe_zona", "regional", "region"):
+            if _c not in t_res.columns:
+                t_res[_c] = SIN_ASIGNAR
+        if "zona" not in t_res.columns:
+            t_res["zona"] = ""
+        t_res["Estado"] = t_res["estado_tienda"].map(_ETIQUETA_ESTADO_TIENDA).fillna(t_res["estado_tienda"])
+        _opciones_estado = [_ETIQUETA_ESTADO_TIENDA[e] for e in _ESTADOS_TIENDA_ORDEN if _ETIQUETA_ESTADO_TIENDA[e] in set(t_res["Estado"])]
+        _estados_sel = st.multiselect(
+            "Qué estados de tienda mostrar", _opciones_estado, default=_opciones_estado, key="res_estados_tienda",
         )
+        t_res = t_res[t_res["Estado"].isin(_estados_sel)]
 
-    # ---------------- 1. De dónde vienen ----------------
-    st.markdown("### 1. ¿De dónde vienen los puntos?")
+        _cols_m = st.columns(len(_opciones_estado) + 1)
+        _cols_m[0].metric("Total de tiendas", f"{len(t_res):,}".replace(",", "."))
+        for _i, _e in enumerate(_opciones_estado):
+            _cols_m[_i + 1].metric(_e, f"{int((t_res['Estado'] == _e).sum()):,}".replace(",", "."))
+
+        if t_res.empty:
+            st.warning("Elige al menos un estado para ver las gráficas.", icon="⚠️")
+        else:
+            st.markdown("**Tiendas por regional**")
+            _g, _fuera = _grafico_tiendas(t_res, "regional", "Regional", top=12)
+            if _g is not None:
+                st.altair_chart(_g, use_container_width=True)
+            if _fuera:
+                st.caption(
+                    f"No se cuentan {_fuera} tienda(s) porque no están en el Excel de jefes "
+                    "(por ejemplo, cerradas o que todavía no abren)."
+                )
+
+            st.markdown("**Tiendas por jefe de zona**")
+            _g, _fuera = _grafico_tiendas(t_res, "jefe_zona", "Jefe de zona", top=15)
+            if _g is not None:
+                st.altair_chart(_g, use_container_width=True)
+            if _fuera:
+                st.caption(f"No se cuentan {_fuera} tienda(s) sin jefe de zona asignado en el Excel de jefes.")
+
+            st.markdown("**Tiendas por zona del book**")
+            _g, _fuera = _grafico_tiendas(t_res, "zona", "Zona", top=12)
+            if _g is not None:
+                st.altair_chart(_g, use_container_width=True)
+            if _fuera:
+                st.caption(f"{_fuera} tienda(s) no tienen zona en el book.")
+
+            st.markdown("**Tiendas por ciudad** (las 12 con más tiendas)")
+            _g, _fuera = _grafico_tiendas(t_res, "ciudad", "Ciudad", top=12)
+            if _g is not None:
+                st.altair_chart(_g, use_container_width=True)
+
+            if zonas_especialistas:
+                st.markdown("**Tiendas por especialista de la zona**")
+                _coords_t = t_res[["latitud", "longitud"]]
+                _asig_t = _zonas_de_tiendas_cacheado(_coords_t, f"{len(zonas_especialistas)}|{_origen_z}|{len(_coords_t)}", zonas_especialistas)
+                t_res_esp = t_res.assign(especialista_zona=_asig_t["especialista_zona"].values)
+                _g, _fuera = _grafico_tiendas(t_res_esp, "especialista_zona", "Especialista", top=12)
+                if _g is not None:
+                    st.altair_chart(_g, use_container_width=True)
+                st.caption(
+                    f"Solo cuentan las tiendas que caen dentro de una zona dibujada en el mapa de especialistas; "
+                    f"{_fuera} tienda(s) quedan fuera de esas zonas y no aparecen aquí."
+                )
+
+    # =================== 2. PUNTOS POTENCIALES ===================
+    st.markdown("### 2. Puntos potenciales enviados")
+    st.caption("Puntos que mandan los especialistas, Operación, Terceros, Localizadores e Inmobiliaria. Aquí se ve quién tiene más.")
+    dfr = df.copy()
+    dfr["fuente"] = dfr["fuente"].replace("", "Sin fuente")
+    st.metric("Total de puntos potenciales", f"{len(dfr):,}".replace(",", "."))
+
     g1, g2 = st.columns(2)
     with g1:
         st.markdown("**Por fuente**")
@@ -1775,61 +1773,11 @@ with tab_resumen:
             use_container_width=True,
         )
     with g2:
-        st.markdown("**Por estado**")
+        st.markdown("**Por estado del punto**")
         por_estado = _conteo(dfr["estado"], "Estado", "Pendiente")
-        st.altair_chart(_barras_horizontales(por_estado, "Estado", "Puntos", "Estado", OXXO_ROJO, top=8, sin_asignar_gris=False), use_container_width=True)
-    st.markdown("**Ciudades con más puntos**")
-    st.altair_chart(
-        _barras_horizontales(_conteo(dfr["ciudad"], "Ciudad"), "Ciudad", "Puntos", "Ciudad", "#1D4ED8", top=10),
-        use_container_width=True,
-    )
+        st.altair_chart(_barras_horizontales(por_estado, "Estado", "Puntos", "Estado", OXXO_ROJO, top=8), use_container_width=True)
 
-    # ---------------- 2. Quién los tiene ----------------
-    st.markdown("### 2. ¿Qué especialista y qué jefe de zona tiene cada punto?")
-    st.caption(
-        "**Especialista:** el de la zona dibujada en el mapa de especialistas donde cae el punto. "
-        "**Jefe de zona y regional:** los de la tienda OXXO más cercana (a menos de 5 km) que tiene jefe asignado."
-    )
-    q1, q2 = st.columns(2)
-    with q1:
-        st.markdown("**Puntos por especialista (zona)**")
-        st.altair_chart(
-            _barras_horizontales(_conteo(dfr["especialista_zona"], "Especialista"), "Especialista", "Puntos", "Especialista de la zona", "#7C3AA8", top=12),
-            use_container_width=True,
-        )
-    with q2:
-        st.markdown("**Puntos por jefe de zona**")
-        st.altair_chart(
-            _barras_horizontales(_conteo(dfr["jefe_zona"], "Jefe de zona"), "Jefe de zona", "Puntos", "Jefe de zona", "#16A34A", top=12),
-            use_container_width=True,
-        )
-    st.markdown("**Puntos por regional**")
-    st.altair_chart(
-        _barras_horizontales(_conteo(dfr["regional"], "Regional"), "Regional", "Puntos", "Regional", "#0891B2", top=10),
-        use_container_width=True,
-    )
-    st.caption(
-        "Las barras en gris son puntos que no cayeron en ninguna zona dibujada o que están a más de 5 km de una tienda con jefe."
-    )
-
-    # Cruce especialista x jefe de zona (solo los que tienen ambos)
-    _cruce = dfr[(dfr["especialista_zona"] != SIN_ASIGNAR) & (dfr["jefe_zona"] != SIN_ASIGNAR)]
-    if not _cruce.empty:
-        st.markdown("**¿Qué jefe de zona acompaña a cada especialista?** (cuántos puntos comparten)")
-        _hm = _cruce.groupby(["especialista_zona", "jefe_zona"]).size().reset_index(name="Puntos")
-        st.altair_chart(
-            alt.Chart(_hm).mark_rect(cornerRadius=3).encode(
-                x=alt.X("jefe_zona:N", title="Jefe de zona", axis=alt.Axis(labelAngle=-40, labelLimit=140)),
-                y=alt.Y("especialista_zona:N", title=None, axis=alt.Axis(labelLimit=200)),
-                color=alt.Color("Puntos:Q", scale=alt.Scale(range=["#FDE2E4", OXXO_ROJO]), legend=alt.Legend(title="Puntos")),
-                tooltip=[alt.Tooltip("especialista_zona:N", title="Especialista"), alt.Tooltip("jefe_zona:N", title="Jefe de zona"), "Puntos:Q"],
-            ).properties(height=max(160, 28 * _hm["especialista_zona"].nunique())),
-            use_container_width=True,
-        )
-
-    # ---------------- 3. Quién los registró ----------------
-    st.markdown("### 3. ¿Quién registró los puntos?")
-    st.markdown("**Por responsable, en cada fuente** (los 5 con más puntos)")
+    st.markdown("**¿Quién registró más puntos?** (los 5 con más, en cada fuente)")
     cols_resumen_fuente = st.columns(2)
     for i_fuente, (fuente_resumen, color_resumen) in enumerate(FUENTE_COLOR_ICONO.items()):
         with cols_resumen_fuente[i_fuente % 2]:
@@ -1851,82 +1799,29 @@ with tab_resumen:
                 if len(conteo_fuente) > 5:
                     st.caption(f"Mostrando los 5 con más puntos, de {len(conteo_fuente)} responsables.")
 
-    st.markdown("**Por practicante** (los practicantes son Laura, Isabela, Elanie, Alisson y Juan Pablo)")
-    _prac = dfr["practicante"].fillna("").astype(str).str.strip() if "practicante" in dfr.columns else pd.Series([], dtype=str)
-    _prac = _prac[_prac != ""]
-    if _prac.empty:
-        st.caption("Todavía no hay puntos con practicante asignado.")
-    else:
-        st.altair_chart(
-            _barras_horizontales(_conteo(_prac, "Practicante"), "Practicante", "Puntos", "Practicante", OXXO_ROJO, top=10),
-            use_container_width=True,
-        )
-    if "gestor" in dfr.columns and (dfr["gestor"].fillna("").astype(str).str.strip() != "").any():
-        st.markdown("**Por gestor asignado** (personas que no son practicantes, como la localizadora)")
-        st.altair_chart(
-            _barras_horizontales(
-                _conteo(dfr.loc[dfr["gestor"].fillna("").astype(str).str.strip() != "", "gestor"], "Gestor"),
-                "Gestor", "Puntos", "Gestor", "#E67E22", top=10,
-            ),
-            use_container_width=True,
-        )
-
-    # ---------------- 4. En el tiempo ----------------
-    st.markdown("### 4. ¿Cómo van en el tiempo?")
-    _fechas = pd.to_datetime(dfr["fecha_registro"], errors="coerce")
-    _tiempo = dfr.assign(_mes=_fechas.dt.to_period("M").dt.to_timestamp()).dropna(subset=["_mes"])
-    if _tiempo.empty:
-        st.caption("Los puntos todavía no tienen fecha de registro.")
-    else:
-        _por_mes = _tiempo.groupby(["_mes", "fuente"]).size().reset_index(name="Puntos")
-        st.altair_chart(
-            alt.Chart(_por_mes).mark_bar().encode(
-                x=alt.X("_mes:T", title=None, axis=alt.Axis(format="%b %Y", labelAngle=-40)),
-                y=alt.Y("Puntos:Q", title="Puntos registrados"),
-                color=alt.Color("fuente:N", title="Fuente", scale=alt.Scale(
-                    domain=list(FUENTE_COLOR_ICONO.keys()) + ["Sin fuente"],
-                    range=[_COLORES_HEX_LEYENDA.get(c, "#7F8C8D") for c in FUENTE_COLOR_ICONO.values()] + ["#7F8C8D"],
-                )),
-                tooltip=[alt.Tooltip("_mes:T", title="Mes", format="%b %Y"), alt.Tooltip("fuente:N", title="Fuente"), "Puntos:Q"],
-            ).properties(height=280),
-            use_container_width=True,
-        )
-
-    # ---------------- 5. Detalle ----------------
-    st.markdown("### 5. Detalle: quién tiene cada punto")
-    f1, f2, f3, f4 = st.columns(4)
-    _f_fuente = f1.multiselect("Fuente", sorted(dfr["fuente"].unique()), key="res_f_fuente")
-    _f_esp = f2.multiselect("Especialista (zona)", sorted(dfr["especialista_zona"].unique()), key="res_f_esp")
-    _f_jefe = f3.multiselect("Jefe de zona", sorted(dfr["jefe_zona"].unique()), key="res_f_jefe")
-    _f_ciudad = f4.multiselect("Ciudad", sorted({c for c in dfr["ciudad"].fillna("").astype(str) if c.strip()}), key="res_f_ciudad")
-    _sel = dfr
-    if _f_fuente:
-        _sel = _sel[_sel["fuente"].isin(_f_fuente)]
-    if _f_esp:
-        _sel = _sel[_sel["especialista_zona"].isin(_f_esp)]
-    if _f_jefe:
-        _sel = _sel[_sel["jefe_zona"].isin(_f_jefe)]
-    if _f_ciudad:
-        _sel = _sel[_sel["ciudad"].isin(_f_ciudad)]
-    _tabla = pd.DataFrame({
-        "Punto": _sel["local_identificado"].values,
-        "Fuente": _sel["fuente"].values,
-        "Ciudad": _sel["ciudad"].replace("", "—").values,
-        "Estado": _sel["estado"].replace("", "Pendiente").values,
-        "Zona (UPZ)": _sel["zona"].values,
-        "Especialista (zona)": _sel["especialista_zona"].values,
-        "Jefe de zona": _sel["jefe_zona"].values,
-        "Regional": _sel["regional"].values,
-        "Registró": _sel["especialista"].replace("", "—").values,
-        "Practicante / gestor": persona_asignada(_sel).values,
-        "Fecha de registro": _sel["fecha_registro"].astype(str).replace({"NaT": "—", "None": "—", "nan": "—"}).values,
-    })
-    st.caption(f"{len(_tabla)} punto(s).")
-    st.dataframe(_tabla, use_container_width=True, hide_index=True)
-    st.download_button(
-        "⬇️ Descargar esta tabla (CSV)", _tabla.to_csv(index=False).encode("utf-8-sig"),
-        file_name="puntos_con_especialista_y_jefe.csv", mime="text/csv", key="descargar_resumen",
-    )
+    p1, p2 = st.columns(2)
+    with p1:
+        st.markdown("**Por practicante** (Laura, Isabela, Elanie, Alisson y Juan Pablo)")
+        _prac = dfr["practicante"].fillna("").astype(str).str.strip() if "practicante" in dfr.columns else pd.Series([], dtype=str)
+        _prac = _prac[_prac != ""]
+        if _prac.empty:
+            st.caption("Todavía no hay puntos con practicante asignado.")
+        else:
+            st.altair_chart(
+                _barras_horizontales(_conteo(_prac, "Practicante"), "Practicante", "Puntos", "Practicante", OXXO_ROJO, top=10),
+                use_container_width=True,
+            )
+    with p2:
+        st.markdown("**Por gestor asignado** (Stefany, Cristian, Jonathan…)")
+        _gest = dfr["gestor"].fillna("").astype(str).str.strip() if "gestor" in dfr.columns else pd.Series([], dtype=str)
+        _gest = _gest[_gest != ""]
+        if _gest.empty:
+            st.caption("Todavía no hay puntos con gestor asignado.")
+        else:
+            st.altair_chart(
+                _barras_horizontales(_conteo(_gest, "Gestor"), "Gestor", "Puntos", "Gestor", "#E67E22", top=10),
+                use_container_width=True,
+            )
 
 
 st.divider()
