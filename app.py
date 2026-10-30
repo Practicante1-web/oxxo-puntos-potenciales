@@ -45,7 +45,6 @@ from utils import (
 from mapa_html import construir_html_mapa
 from zonas import (
     SIN_ASIGNAR,
-    asignar_responsables_a_puntos,
     colores_por_grupo,
     leer_jefes_regionales,
     interpretar_zona,
@@ -1408,29 +1407,14 @@ with tab_regional:
     _ruta_j = _ruta_archivo(["jefes_regionales.xlsx", "Jefes_regionales.xlsx"])
     _ruta_z = _ruta_archivo(["zonas_especialistas.kml", "zonas_especialistas.kmz", "zonas.kml", "zonas.kmz"])
 
-    with st.expander("📁 Archivos de esta hoja (jefes y zonas)", expanded=False):
-        st.caption(
-            "Normalmente no tienes que hacer nada: los archivos `jefes_regionales.xlsx` y "
-            "`zonas_especialistas.kml` viajan con la app en GitHub. Si quieres probar con otros, "
-            "cárgalos aquí (solo duran mientras tengas esta pestaña abierta)."
-        )
-        _sub_j = st.file_uploader("Excel de jefes y regionales", type=["xlsx"], key="subir_jefes")
-        _sub_z = st.file_uploader("Zonas de especialistas (KML o KMZ de Google My Maps)", type=["kml", "kmz"], key="subir_zonas")
-
-    if _sub_j is not None:
-        df_jefes = leer_jefes_regionales(_sub_j.getvalue())
-        _origen_j = f"cargado ahora: {_sub_j.name}"
-    elif _ruta_j is not None:
+    if _ruta_j is not None:
         df_jefes = _cargar_jefes(str(_ruta_j), _ruta_j.stat().st_mtime)
         _origen_j = _ruta_j.name
     else:
         df_jefes = leer_jefes_regionales(b"")
         _origen_j = ""
 
-    if _sub_z is not None:
-        _zonas_crudas = leer_zonas_kml(_sub_z.getvalue())
-        _origen_z = f"cargado ahora: {_sub_z.name}"
-    elif _ruta_z is not None:
+    if _ruta_z is not None:
         _zonas_crudas = _cargar_zonas(str(_ruta_z), _ruta_z.stat().st_mtime)
         _origen_z = _ruta_z.name
     else:
@@ -1447,7 +1431,7 @@ with tab_regional:
         if df_jefes.empty:
             st.warning(
                 "No encontré el Excel de jefes y regionales (`jefes_regionales.xlsx`). "
-                "Súbelo a GitHub junto a `app.py`, o cárgalo en «Archivos de esta hoja».",
+                "Súbelo a GitHub junto a `app.py`.",
                 icon="⚠️",
             )
         else:
@@ -1459,7 +1443,7 @@ with tab_regional:
             st.info(
                 "🧩 Todavía no hay zonas de especialistas cargadas. Exporta tu mapa de Google My Maps "
                 "como KML (⋮ junto al nombre del mapa → «Exportar a KML/KMZ») y súbelo a GitHub con el nombre "
-                "`zonas_especialistas.kml`, o cárgalo en «Archivos de esta hoja».",
+                "`zonas_especialistas.kml`.",
                 icon="🧩",
             )
         else:
@@ -1617,12 +1601,6 @@ _COLOR_ESTADO_TIENDA = {
 }
 
 
-@st.cache_data(show_spinner="Ubicando las tiendas en las zonas de especialistas...", ttl=TTL_CACHE_DATOS)
-def _zonas_de_tiendas_cacheado(coordenadas: pd.DataFrame, firma: str, _zonas):
-    """Especialista de la zona dibujada donde cae cada tienda (la `firma` recalcula si cambian los archivos)."""
-    return asignar_responsables_a_puntos(coordenadas, _zonas, None)
-
-
 def _barras_horizontales(datos: pd.DataFrame, categoria: str, valor: str, titulo_cat: str, color: str, top: int = 10):
     """Barras horizontales ordenadas, con el número al final de cada barra (una sola tonalidad)."""
     d = datos.head(top).copy()
@@ -1679,7 +1657,7 @@ with tab_resumen:
     st.markdown("### 1. Tiendas OXXO")
     st.caption(
         "Tiendas abiertas, en expansión, firmadas, en obra y cerradas, según el book. "
-        "El jefe de zona y el regional salen del Excel de jefes; el especialista, del mapa de zonas."
+        "El jefe de zona y el regional salen del Excel de jefes."
     )
     if df_tiendas is None or not len(df_tiendas):
         st.info("Todavía no están cargadas las tiendas OXXO, por eso no se pueden mostrar estas gráficas.", icon="ℹ️")
@@ -1734,19 +1712,6 @@ with tab_resumen:
             if _g is not None:
                 st.altair_chart(_g, use_container_width=True)
 
-            if zonas_especialistas:
-                st.markdown("**Tiendas por especialista de la zona**")
-                _coords_t = t_res[["latitud", "longitud"]]
-                _asig_t = _zonas_de_tiendas_cacheado(_coords_t, f"{len(zonas_especialistas)}|{_origen_z}|{len(_coords_t)}", zonas_especialistas)
-                t_res_esp = t_res.assign(especialista_zona=_asig_t["especialista_zona"].values)
-                _g, _fuera = _grafico_tiendas(t_res_esp, "especialista_zona", "Especialista", top=12)
-                if _g is not None:
-                    st.altair_chart(_g, use_container_width=True)
-                st.caption(
-                    f"Solo cuentan las tiendas que caen dentro de una zona dibujada en el mapa de especialistas; "
-                    f"{_fuera} tienda(s) quedan fuera de esas zonas y no aparecen aquí."
-                )
-
     # =================== 2. PUNTOS POTENCIALES ===================
     st.markdown("### 2. Puntos potenciales enviados")
     st.caption("Puntos que mandan los especialistas, Operación, Terceros, Localizadores e Inmobiliaria. Aquí se ve quién tiene más.")
@@ -1754,28 +1719,22 @@ with tab_resumen:
     dfr["fuente"] = dfr["fuente"].replace("", "Sin fuente")
     st.metric("Total de puntos potenciales", f"{len(dfr):,}".replace(",", "."))
 
-    g1, g2 = st.columns(2)
-    with g1:
-        st.markdown("**Por fuente**")
-        por_fuente = _conteo(dfr["fuente"], "Fuente")
-        st.altair_chart(
-            alt.Chart(por_fuente).mark_bar(cornerRadiusEnd=4).encode(
-                y=alt.Y("Fuente:N", sort="-x", title=None, scale=alt.Scale(paddingInner=0.3)),
-                x=alt.X("Puntos:Q", title=None, axis=alt.Axis(tickMinStep=1)),
-                color=alt.Color("Fuente:N", legend=None, scale=alt.Scale(
-                    domain=[f for f in por_fuente["Fuente"]],
-                    range=[_COLORES_HEX_LEYENDA.get(FUENTE_COLOR_ICONO.get(f, ""), "#7F8C8D") for f in por_fuente["Fuente"]],
-                )),
-                tooltip=["Fuente", "Puntos"],
-            ).properties(height=max(110, 34 * len(por_fuente))) +
-            alt.Chart(por_fuente).mark_text(align="left", dx=4, color="#1A1A1A").encode(
-                y=alt.Y("Fuente:N", sort="-x"), x="Puntos:Q", text="Puntos:Q"),
-            use_container_width=True,
-        )
-    with g2:
-        st.markdown("**Por estado del punto**")
-        por_estado = _conteo(dfr["estado"], "Estado", "Pendiente")
-        st.altair_chart(_barras_horizontales(por_estado, "Estado", "Puntos", "Estado", OXXO_ROJO, top=8), use_container_width=True)
+    st.markdown("**Por fuente**")
+    por_fuente = _conteo(dfr["fuente"], "Fuente")
+    st.altair_chart(
+        alt.Chart(por_fuente).mark_bar(cornerRadiusEnd=4).encode(
+            y=alt.Y("Fuente:N", sort="-x", title=None, scale=alt.Scale(paddingInner=0.3)),
+            x=alt.X("Puntos:Q", title=None, axis=alt.Axis(tickMinStep=1)),
+            color=alt.Color("Fuente:N", legend=None, scale=alt.Scale(
+                domain=[f for f in por_fuente["Fuente"]],
+                range=[_COLORES_HEX_LEYENDA.get(FUENTE_COLOR_ICONO.get(f, ""), "#7F8C8D") for f in por_fuente["Fuente"]],
+            )),
+            tooltip=["Fuente", "Puntos"],
+        ).properties(height=max(110, 34 * len(por_fuente))) +
+        alt.Chart(por_fuente).mark_text(align="left", dx=4, color="#1A1A1A").encode(
+            y=alt.Y("Fuente:N", sort="-x"), x="Puntos:Q", text="Puntos:Q"),
+        use_container_width=True,
+    )
 
     st.markdown("**¿Quién registró más puntos?** (los 5 con más, en cada fuente)")
     cols_resumen_fuente = st.columns(2)
@@ -1799,29 +1758,16 @@ with tab_resumen:
                 if len(conteo_fuente) > 5:
                     st.caption(f"Mostrando los 5 con más puntos, de {len(conteo_fuente)} responsables.")
 
-    p1, p2 = st.columns(2)
-    with p1:
-        st.markdown("**Por practicante** (Laura, Isabela, Elanie, Alisson y Juan Pablo)")
-        _prac = dfr["practicante"].fillna("").astype(str).str.strip() if "practicante" in dfr.columns else pd.Series([], dtype=str)
-        _prac = _prac[_prac != ""]
-        if _prac.empty:
-            st.caption("Todavía no hay puntos con practicante asignado.")
-        else:
-            st.altair_chart(
-                _barras_horizontales(_conteo(_prac, "Practicante"), "Practicante", "Puntos", "Practicante", OXXO_ROJO, top=10),
-                use_container_width=True,
-            )
-    with p2:
-        st.markdown("**Por gestor asignado** (Stefany, Cristian, Jonathan…)")
-        _gest = dfr["gestor"].fillna("").astype(str).str.strip() if "gestor" in dfr.columns else pd.Series([], dtype=str)
-        _gest = _gest[_gest != ""]
-        if _gest.empty:
-            st.caption("Todavía no hay puntos con gestor asignado.")
-        else:
-            st.altair_chart(
-                _barras_horizontales(_conteo(_gest, "Gestor"), "Gestor", "Puntos", "Gestor", "#E67E22", top=10),
-                use_container_width=True,
-            )
+    st.markdown("**Por practicante** (Laura, Isabela, Elanie, Alisson y Juan Pablo)")
+    _prac = dfr["practicante"].fillna("").astype(str).str.strip() if "practicante" in dfr.columns else pd.Series([], dtype=str)
+    _prac = _prac[_prac != ""]
+    if _prac.empty:
+        st.caption("Todavía no hay puntos con practicante asignado.")
+    else:
+        st.altair_chart(
+            _barras_horizontales(_conteo(_prac, "Practicante"), "Practicante", "Puntos", "Practicante", OXXO_ROJO, top=10),
+            use_container_width=True,
+        )
 
 
 st.divider()
