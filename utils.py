@@ -139,7 +139,7 @@ def cargar_puntos() -> pd.DataFrame:
     """Carga el 'histórico' de puntos potenciales desde el CSV normalizado."""
     df = pd.read_csv(CSV_PATH)
     df["fecha_registro"] = pd.to_datetime(df["fecha_registro"], errors="coerce").dt.date
-    return df
+    return aplicar_roles_personas(df)
 
 
 def guardar_puntos(df: pd.DataFrame) -> None:
@@ -272,7 +272,7 @@ def leer_archivo_fuente(ruta_o_buffer, nombre_archivo: str = "") -> pd.DataFrame
     else:
         crudo = _leer_excel_hoja_preferida(ruta_o_buffer)
 
-    return _normalizar_crudo(crudo)
+    return aplicar_roles_personas(_normalizar_crudo(crudo))
 
 
 def convertir_link_compartido_a_descarga(url: str) -> str:
@@ -727,6 +727,73 @@ def _parsear_formato_seguimiento(crudo: pd.DataFrame, fuente: str) -> pd.DataFra
     return normalizado
 
 
+# ---------------------------------------------------------------------------
+# Roles de las personas: SOLO estas cinco personas son practicantes. Cualquier
+# otro nombre que venga en la columna de practicante / "Gestor asignado" (por
+# ejemplo Stefany Prieto, que es localizadora) no se muestra como practicante.
+# ---------------------------------------------------------------------------
+PRACTICANTES = ["Laura", "Isabela", "Elanie", "Alisson", "Juan Pablo"]
+
+# nombre normalizado (sin tildes, minúsculas) -> nombre que se muestra
+_PRACTICANTES_NORMALIZADOS = {
+    "laura": "Laura",
+    "isabela": "Isabela",
+    "elanie": "Elanie",
+    "elaine": "Elanie",
+    "alisson": "Alisson",
+    "alison": "Alisson",
+    "juan": "Juan Pablo",          # en el Excel aparece solo como "Juan"
+    "juan pablo": "Juan Pablo",
+}
+
+# Personas que NO son practicantes y cuyo cargo ya se conoce.
+_CARGOS_CONOCIDOS = {
+    "stefany prieto": ("Stefany Prieto", "Localizadora"),
+    "stefanny prieto": ("Stefany Prieto", "Localizadora"),
+}
+
+
+def clasificar_persona(valor) -> tuple:
+    """
+    Dado el nombre que viene en "Practicante" / "Gestor asignado", devuelve
+    (practicante, gestor): el nombre va en `practicante` solo si es uno de los
+    cinco practicantes; si no, va en `gestor` (con su cargo cuando se conoce,
+    por ejemplo "Stefany Prieto (Localizadora)").
+    """
+    texto = "" if valor is None or (isinstance(valor, float) and pd.isna(valor)) else str(valor).strip()
+    if not texto or texto.lower() == "nan":
+        return "", ""
+    clave = normalizar_texto(texto)
+    if clave in _PRACTICANTES_NORMALIZADOS:
+        return _PRACTICANTES_NORMALIZADOS[clave], ""
+    if clave in _CARGOS_CONOCIDOS:
+        nombre, cargo = _CARGOS_CONOCIDOS[clave]
+        return "", f"{nombre} ({cargo})"
+    return "", texto
+
+
+def persona_asignada(d: pd.DataFrame) -> pd.Series:
+    """Practicante si lo hay; si no, el gestor asignado (con su cargo); si no, '—'."""
+    n = len(d)
+    prac = d["practicante"].fillna("").astype(str).str.strip() if "practicante" in d.columns else pd.Series([""] * n, index=d.index)
+    gest = d["gestor"].fillna("").astype(str).str.strip() if "gestor" in d.columns else pd.Series([""] * n, index=d.index)
+    return prac.where(prac != "", gest).replace("", "—")
+
+
+def aplicar_roles_personas(df: pd.DataFrame) -> pd.DataFrame:
+    """Separa `practicante` (solo los 5 practicantes) de `gestor` (cualquier otra persona)."""
+    if df is None or "practicante" not in df.columns:
+        return df
+    pares = df["practicante"].apply(clasificar_persona)
+    df = df.copy()
+    previo = df["gestor"].fillna("").astype(str) if "gestor" in df.columns else None
+    df["practicante"] = [p for p, _ in pares]
+    df["gestor"] = [g for _, g in pares]
+    if previo is not None:
+        df["gestor"] = df["gestor"].where(df["gestor"] != "", previo)
+    return df
+
+
 def leer_fuentes_modulo1(ruta_o_buffer, nombre_archivo: str = "") -> pd.DataFrame:
     """
     Lee el Excel de Módulo 1 (una hoja por fuente: especialistas/ISO,
@@ -807,6 +874,7 @@ def leer_fuentes_modulo1(ruta_o_buffer, nombre_archivo: str = "") -> pd.DataFram
     combinado = pd.concat(partes, ignore_index=True)
     combinado["id"] = range(1, len(combinado) + 1)
     combinado = combinado.reindex(columns=COLUMNAS, fill_value="")
+    combinado = aplicar_roles_personas(combinado)
     # Si alguna hoja SÍ se encontró pero falló al leerla (p. ej. una
     # columna con un formato inesperado en alguna fila), esa fuente
     # queda simplemente sin puntos — sin tumbar la carga de las demás —
@@ -1384,7 +1452,7 @@ def parsear_tiendas(crudo: pd.DataFrame) -> pd.DataFrame:
     `.attrs` (columnas encontradas, estados no reconocidos, etc.) para
     mostrarla en la app si algo no calza.
     """
-    salida_vacia = pd.DataFrame(columns=["nombre", "estado_tienda", "cr", "apertura", "ciudad", "direccion", "detalle", "latitud", "longitud"])
+    salida_vacia = pd.DataFrame(columns=["nombre", "estado_tienda", "cr", "apertura", "ciudad", "direccion", "detalle", "latitud", "longitud", "renta", "renta_6m"])
     if crudo is None or crudo.empty:
         salida_vacia.attrs["diagnostico"] = {"error": "La hoja de tiendas está vacía."}
         return salida_vacia
@@ -1526,10 +1594,26 @@ def parsear_tiendas(crudo: pd.DataFrame) -> pd.DataFrame:
     c_area, c_gen, c_seg, c_tie = col("area"), col("generador"), col("seg26", "segmento"), col("tie26")
     c_mes = col("mesop", "meses op", "meses operando")
     c_vta, c_vta6 = col("ventas oum", "ventas um"), col("vu6m")
+
+    def _col_contiene(*claves, excluir=()):
+        for c, n in normal.items():
+            if any(k in n for k in claves) and not any(x in n for x in excluir):
+                return c
+        return None
+
+    # Renta: último mes (septiembre en el modelo de contabilidad) y promedio de 6 meses.
+    # Se busca por varios nombres posibles ("RENTA", "RENTA UM", "RU6M", "RENTA U6M"…).
+    c_ren6 = col("ru6m", "renta u6m", "renta 6m", "renta um6", "renta promedio 6m") or _col_contiene("ru6m", "renta u6m", "renta 6")
+    c_ren = (col("renta", "renta um", "renta oum", "renta ultimo mes", "rentas", "canon", "arriendo")
+             or _col_contiene("renta", excluir=("u6m", "6m", "ru6", "m2", "mt2", "metro", "arrendador", "rentab")))
+    c_cm2 = col("costo m2", "costo/m2", "costo por m2", "costo mt2", "renta m2") or _col_contiene("costo m2", "costo/m2", "costo m 2")
+    diag["columna_renta"] = c_ren
+    diag["columna_renta_6m"] = c_ren6
     c_tra, c_tra6 = col("trafico um"), col("tru6")
     c_tic, c_tic6 = col("ticket um"), col("ticket u6m")
     c_sc, c_scf = col("score"), col("scoref")
     n_area, n_mes, n_vta, n_vta6 = num(c_area), num(c_mes), num(c_vta), num(c_vta6)
+    n_ren, n_ren6, n_cm2 = num(c_ren), num(c_ren6), num(c_cm2)
     n_tra, n_tra6, n_tic, n_tic6 = num(c_tra), num(c_tra6), num(c_tic), num(c_tic6)
     n_sc, n_scf, n_estr = num(c_sc), num(c_scf), num(c_estrato)
 
@@ -1562,6 +1646,23 @@ def parsear_tiendas(crudo: pd.DataFrame) -> pd.DataFrame:
                 L.append(f"{etq}: {v}")
         if pd.notna(n_vta[i]) and n_vta[i] != 0:
             L.append(f"Ventas último mes: {fmt(n_vta[i])}" + (f" · prom. 6 meses: {fmt(n_vta6[i])}" if pd.notna(n_vta6[i]) else ""))
+        # Renta: siempre se muestra la línea (con "sin dato" si está vacía) porque es de las
+        # cosas que más se consultan en la ficha. Una renta negativa se marca como revisión.
+        if c_ren is not None or c_ren6 is not None:
+            def _pesos(v):
+                # Solo el número, tal cual está en el book (sin símbolo ni unidad)
+                return ("-" if v < 0 else "") + fmt(abs(v))
+            if pd.notna(n_ren[i]):
+                linea_r = f"Renta último mes: {_pesos(n_ren[i])}"
+                if n_ren[i] < 0:
+                    linea_r += " ⚠️ (valor negativo, revisar)"
+            else:
+                linea_r = "Renta último mes: sin dato"
+            if pd.notna(n_ren6[i]):
+                linea_r += f" · prom. 6 meses: {_pesos(n_ren6[i])}"
+            if pd.notna(n_cm2[i]) and n_cm2[i] > 0:
+                linea_r += f" · {_pesos(n_cm2[i])} por m²"
+            L.append(linea_r)
         if pd.notna(n_tra[i]) and n_tra[i] != 0:
             L.append(f"Tráfico último mes: {fmt(n_tra[i])}" + (f" · prom. 6 meses: {fmt(n_tra6[i])}" if pd.notna(n_tra6[i]) else ""))
         if pd.notna(n_tic[i]) and n_tic[i] != 0:
@@ -1595,6 +1696,7 @@ def parsear_tiendas(crudo: pd.DataFrame) -> pd.DataFrame:
         "nombre": nombre, "estado_tienda": estado, "cr": crm, "apertura": aperturas,
         "ciudad": txt(col_ciudad).apply(normalizar_ciudad),
         "direccion": txt(col_dir), "detalle": fichas, "latitud": lat, "longitud": lon,
+        "renta": n_ren.astype(float), "renta_6m": n_ren6.astype(float),
     })
     total = len(resultado)
     en_colombia = resultado["latitud"].between(_LAT_MIN, _LAT_MAX) & resultado["longitud"].between(_LON_MIN, _LON_MAX)
