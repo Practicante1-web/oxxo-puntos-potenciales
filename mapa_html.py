@@ -67,7 +67,10 @@ def _lineas_punto(row) -> list:
         f"Responsable: {v('especialista')}",
     ]
     if "practicante" in row:
-        lineas.append(f"Practicante: {v('practicante')}")
+        if v("practicante") == "—" and "gestor" in row and v("gestor") != "—":
+            lineas.append(f"Gestor asignado: {v('gestor')}")
+        else:
+            lineas.append(f"Practicante: {v('practicante')}")
     lineas += [
         f"Estado: {v('estado')}",
         f"Fecha de registro: {v('fecha_registro')}",
