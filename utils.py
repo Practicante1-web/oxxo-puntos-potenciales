@@ -730,7 +730,8 @@ def _parsear_formato_seguimiento(crudo: pd.DataFrame, fuente: str) -> pd.DataFra
 # ---------------------------------------------------------------------------
 # Roles de las personas: SOLO estas cinco personas son practicantes. Cualquier
 # otro nombre que venga en la columna de practicante / "Gestor asignado" (por
-# ejemplo Stefany Prieto, que es localizadora) no se muestra como practicante.
+# ejemplo Stefany Prieto, Cristian Herrera o Jonathan Aguirre, que son gestores)
+# no se muestra como practicante.
 # ---------------------------------------------------------------------------
 PRACTICANTES = ["Laura", "Isabela", "Elanie", "Alisson", "Juan Pablo"]
 
@@ -746,19 +747,25 @@ _PRACTICANTES_NORMALIZADOS = {
     "juan pablo": "Juan Pablo",
 }
 
-# Personas que NO son practicantes y cuyo cargo ya se conoce.
-_CARGOS_CONOCIDOS = {
-    "stefany prieto": ("Stefany Prieto", "Localizadora"),
-    "stefanny prieto": ("Stefany Prieto", "Localizadora"),
+# Gestores (no son practicantes): se muestran con su nombre bajo "Gestor asignado".
+# Cada variante de escritura se unifica en un solo nombre.
+_GESTORES = {
+    "stefany prieto": "Stefany Prieto",
+    "stefanny prieto": "Stefany Prieto",
+    "cristian herrera": "Cristian Herrera",
+    "jonathan aguirre": "Jonathan Aguirre",
 }
+
+# Personas que no se muestran ni como practicante ni como gestor.
+_PERSONAS_EXCLUIDAS = {"juan rojas"}
 
 
 def clasificar_persona(valor) -> tuple:
     """
     Dado el nombre que viene en "Practicante" / "Gestor asignado", devuelve
     (practicante, gestor): el nombre va en `practicante` solo si es uno de los
-    cinco practicantes; si no, va en `gestor` (con su cargo cuando se conoce,
-    por ejemplo "Stefany Prieto (Localizadora)").
+    cinco practicantes; si no, va en `gestor` (Stefany Prieto, Cristian Herrera,
+    Jonathan Aguirre…). Juan Rojas no se muestra en ninguno de los dos.
     """
     texto = "" if valor is None or (isinstance(valor, float) and pd.isna(valor)) else str(valor).strip()
     if not texto or texto.lower() == "nan":
@@ -766,9 +773,10 @@ def clasificar_persona(valor) -> tuple:
     clave = normalizar_texto(texto)
     if clave in _PRACTICANTES_NORMALIZADOS:
         return _PRACTICANTES_NORMALIZADOS[clave], ""
-    if clave in _CARGOS_CONOCIDOS:
-        nombre, cargo = _CARGOS_CONOCIDOS[clave]
-        return "", f"{nombre} ({cargo})"
+    if clave in _PERSONAS_EXCLUIDAS:
+        return "", ""
+    if clave in _GESTORES:
+        return "", _GESTORES[clave]
     return "", texto
 
 
@@ -1452,7 +1460,7 @@ def parsear_tiendas(crudo: pd.DataFrame) -> pd.DataFrame:
     `.attrs` (columnas encontradas, estados no reconocidos, etc.) para
     mostrarla en la app si algo no calza.
     """
-    salida_vacia = pd.DataFrame(columns=["nombre", "estado_tienda", "cr", "apertura", "ciudad", "direccion", "detalle", "latitud", "longitud", "renta", "renta_6m"])
+    salida_vacia = pd.DataFrame(columns=["nombre", "estado_tienda", "cr", "apertura", "ciudad", "direccion", "detalle", "latitud", "longitud", "renta", "renta_6m", "zona"])
     if crudo is None or crudo.empty:
         salida_vacia.attrs["diagnostico"] = {"error": "La hoja de tiendas está vacía."}
         return salida_vacia
@@ -1697,6 +1705,7 @@ def parsear_tiendas(crudo: pd.DataFrame) -> pd.DataFrame:
         "ciudad": txt(col_ciudad).apply(normalizar_ciudad),
         "direccion": txt(col_dir), "detalle": fichas, "latitud": lat, "longitud": lon,
         "renta": n_ren.astype(float), "renta_6m": n_ren6.astype(float),
+        "zona": txt(c_zona) if c_zona is not None else "",
     })
     total = len(resultado)
     en_colombia = resultado["latitud"].between(_LAT_MIN, _LAT_MAX) & resultado["longitud"].between(_LON_MIN, _LON_MAX)
