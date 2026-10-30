@@ -26,6 +26,7 @@ import streamlit.components.v1 as components
 
 from iconos import icon_data
 from utils import (
+    persona_asignada,
     FUENTE_COLOR_ICONO,
     HOJA_TIENDAS_DEFECTO,
     UMBRAL_DUPLICIDAD_M,
@@ -44,7 +45,9 @@ from utils import (
 from mapa_html import construir_html_mapa
 from zonas import (
     SIN_ASIGNAR,
+    asignar_responsables_a_puntos,
     buscar_direccion,
+    buscar_direccion_auto,
     colores_por_grupo,
     leer_jefes_regionales,
     interpretar_zona,
@@ -55,6 +58,9 @@ from zonas import (
     unir_jefes_a_tiendas,
     zonas_de_punto,
 )
+
+# Nombre del aplicativo: cambiarlo aquí cambia la pestaña del navegador, el menú lateral y el encabezado.
+NOMBRE_APP = "Puntos Potenciales"
 
 METADATA_PATH = Path("data/metadata.json")
 RUTA_EXCEL_BUNDLED = Path("data/Puntos_potenciales.xlsx")
@@ -182,6 +188,20 @@ def _texto_tooltip_resaltado(item) -> str:
     return texto
 
 
+def _texto_renta(d: pd.DataFrame, columna: str) -> list:
+    """Renta lista para mostrar en una tabla (solo el número); '—' si no hay dato."""
+    if columna not in d.columns:
+        return ["—"] * len(d)
+    r = []
+    for v in pd.to_numeric(d[columna], errors="coerce"):
+        if pd.isna(v):
+            r.append("—")
+        else:
+            t = f"{abs(v):,.0f}".replace(",", ".")
+            r.append(("-" if v < 0 else "") + t)
+    return r
+
+
 def _celda_tooltip(d: pd.DataFrame, columna: str) -> pd.Series:
     """Columna de texto lista para el tooltip: vacíos como '—'."""
     if columna not in d.columns:
@@ -195,7 +215,13 @@ def _columna_tooltip_fuente(d: pd.DataFrame) -> pd.Series:
     texto = texto + "\nFuente: " + _celda_tooltip(d, "fuente")
     texto = texto + "\nResponsable: " + _celda_tooltip(d, "especialista")
     if "practicante" in d.columns:
-        texto = texto + "\nPracticante: " + _celda_tooltip(d, "practicante")
+        _prac = _celda_tooltip(d, "practicante")
+        _gest = _celda_tooltip(d, "gestor")
+        _etq = pd.Series(
+            ["Practicante" if p != "—" else ("Gestor asignado" if g != "—" else "Practicante") for p, g in zip(_prac, _gest)],
+            index=d.index,
+        )
+        texto = texto + "\n" + _etq + ": " + _prac.where(_prac != "—", _gest)
     texto = texto + "\nEstado: " + _celda_tooltip(d, "estado")
     texto = texto + "\nFecha de registro: " + _celda_tooltip(d, "fecha_registro")
     texto = texto + "\nCiudad: " + _celda_tooltip(d, "ciudad")
@@ -362,7 +388,7 @@ OXXO_GRIS_FONDO = "#F7F7F8"
 OXXO_GRIS_BORDE = "#E5E5E8"
 
 st.set_page_config(
-    page_title="Puntos Potenciales | Inteligencia de Expansión OXXO",
+    page_title=f"{NOMBRE_APP} | OXXO",
     page_icon="📍",
     layout="wide",
 )
@@ -800,8 +826,8 @@ _hay_fuente_url = bool(url_secreta) or (metadata.get("modo") == "url" and metada
 # de actualizar, para que la página principal quede limpia.
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("### 📍 OXXO")
-    st.markdown("**Inteligencia de Expansión**")
+    st.markdown(f"### 📍 {NOMBRE_APP}")
+    st.markdown("**OXXO · Inteligencia de Expansión**")
     st.caption("Consulta y seguimiento de puntos potenciales")
     st.write(
         "Antes de visitar o analizar un punto potencial, revisa aquí si ya "
@@ -855,10 +881,10 @@ st.markdown(
         ">OXXO</div>
         <div>
             <div style="color: #FFFFFF; font-size: 24px; font-weight: 700; line-height: 1.25;">
-                Consulta y seguimiento de puntos potenciales
+                {NOMBRE_APP}
             </div>
             <div style="color: {OXXO_NARANJA}; font-size: 14px; font-weight: 600;">
-                Inteligencia de Expansión &nbsp;·&nbsp; Prototipo de práctica profesional
+                Consulta y seguimiento de puntos potenciales &nbsp;·&nbsp; Inteligencia de Expansión
             </div>
         </div>
     </div>
@@ -912,9 +938,18 @@ def _cargar_zonas(ruta: str, firma: float):
     return leer_zonas_kml(ruta)
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def _buscar_direccion_cacheado(texto: str, ciudad: str):
-    return buscar_direccion(texto, ciudad)
+def _llave_google() -> str:
+    """Llave de Google (Secrets de Streamlit: GOOGLE_MAPS_API_KEY). Vacía si no está configurada."""
+    try:
+        return str(st.secrets.get("GOOGLE_MAPS_API_KEY", "") or "").strip()
+    except Exception:
+        return ""
+
+
+@st.cache_data(show_spinner="Buscando la dirección...", ttl=3600)
+def _buscar_direccion_cacheado(texto: str, ciudad: str, llave: str = ""):
+    """Dirección -> coordenada. Con llave de Google usa Google; sin ella, OpenStreetMap."""
+    return buscar_direccion_auto(texto, ciudad, llave)
 
 
 def _zonas_con_lineas(zonas: list) -> list:
@@ -945,15 +980,24 @@ def renderizar_mapa_regional(tiendas, grupos, zonas, resaltado, altura=640, cent
 
 
 # ---------------------------------------------------------------------------
-# Tres hojas (pestañas) para tener la información ordenada:
-#   1) Mapa y revisión de puntos  2) Resumen general  3) Duplicados
+# Hojas (pestañas), en este orden:
+#   1) Mapa y revisión de puntos  2) Búsqueda de regional y jefes
+#   3) Resumen general            4) Duplicados
+# (El código de cada hoja puede ir en otro orden: lo que manda es este arreglo.
+#  El resumen va DESPUÉS de la búsqueda de regionales en el código porque usa
+#  las zonas y los jefes que esa hoja carga.)
 # ---------------------------------------------------------------------------
-tab_mapa, tab_resumen, tab_dup, tab_regional = st.tabs([
+tab_mapa, tab_regional, tab_resumen, tab_dup = st.tabs([
     "🗺️ Mapa y revisión de puntos",
+    "🧭 Búsqueda de regional y jefes",
     "📊 Resumen general",
     "⚠️ Duplicados",
-    "🧭 Búsqueda de regional y jefes",
 ])
+
+# Los llena la hoja de regionales y los usa el resumen general.
+tiendas_jefes = None
+zonas_especialistas = []
+_origen_j = _origen_z = ""
 
 # ===== HOJA 1 · Mapa y revisión de puntos ==================================
 # Orden: búsqueda (nombre / coordenada) → mapa con la búsqueda y tiendas cerca →
@@ -966,7 +1010,7 @@ with tab_mapa:
         "otra fuente y si hay **tiendas OXXO cerca**."
     )
     st.markdown(
-        "1. **Busca el punto** por nombre o por coordenada.\n"
+        "1. **Busca el punto** por nombre, por **dirección** (te da la coordenada al instante) o por coordenada.\n"
         "2. **Mira el mapa:** el punto buscado aparece en **rojo**, junto a los puntos "
         "potenciales (Especialistas, Localizadores, Terceros, Operación e Inmobiliarias) y a "
         "las tiendas OXXO (abiertas, en expansión, firmadas, en obra y cerradas) que tiene alrededor.\n"
@@ -975,12 +1019,12 @@ with tab_mapa:
     )
 
     def _limpiar_busqueda_mapa():
-        for _k in ("resultado_busqueda_nombre", "resultado_busqueda_punto", "error_busqueda_punto", "sel_nombre_mapa_unico"):
+        for _k in ("resultado_busqueda_nombre", "resultado_busqueda_punto", "error_busqueda_punto", "sel_nombre_mapa_unico", "opciones_dir_mapa", "error_dir_mapa"):
             st.session_state.pop(_k, None)
 
     modo_busqueda = st.radio(
         "¿Cómo quieres buscar?",
-        ["Por nombre", "Por coordenada"],
+        ["Por nombre", "Por dirección", "Por coordenada"],
         horizontal=True,
         key="modo_busqueda_mapa_unico",
     )
@@ -1061,6 +1105,45 @@ with tab_mapa:
                             f"\nCiudad: {_v(_f.ciudad)}"
                         ),
                     }
+
+    elif modo_busqueda == "Por dirección":
+        # Escribes la dirección tal cual la tienes y la app te devuelve la coordenada, sin salir de
+        # esta página. Con llave de Google (Secrets: GOOGLE_MAPS_API_KEY) usa Google; sin ella, OpenStreetMap.
+        _usa_google = bool(_llave_google())
+        c_dir_m, c_ciu_m, c_btn_m = st.columns([4, 2, 1], vertical_alignment="bottom")
+        _dir_m = c_dir_m.text_input("Dirección", key="dir_mapa_unico", placeholder="Ej. Calle 80 # 69-50")
+        _ciu_m = c_ciu_m.text_input("Ciudad", key="ciudad_dir_mapa_unico", placeholder="Ej. Bogotá")
+        if c_btn_m.button("🔍 Buscar", type="primary", key="buscar_dir_mapa_unico", use_container_width=True):
+            _res_m, _err_m = _buscar_direccion_cacheado(_dir_m, _ciu_m, _llave_google())
+            st.session_state["opciones_dir_mapa"] = _res_m
+            st.session_state["error_dir_mapa"] = _err_m
+            st.session_state.pop("resultado_busqueda_punto", None)
+            if _res_m:
+                st.session_state["resultado_busqueda_punto"] = {
+                    "lat": _res_m[0]["lat"], "lon": _res_m[0]["lon"],
+                    "etiqueta": (_dir_m.strip() or "Dirección"),
+                    "info_extra": f"Dirección encontrada: {_res_m[0]['nombre']}\nCoordenada: {_res_m[0]['lat']:.6f}, {_res_m[0]['lon']:.6f}",
+                }
+        _opc_m = st.session_state.get("opciones_dir_mapa") or []
+        if len(_opc_m) > 1:
+            _et_m = [f"{i + 1}. {o['nombre']}" for i, o in enumerate(_opc_m)]
+            _sel_m = st.selectbox("Encontré varias direcciones parecidas, elige la correcta:", _et_m, key="sel_dir_mapa_unico")
+            _o_m = _opc_m[_et_m.index(_sel_m)]
+            st.session_state["resultado_busqueda_punto"] = {
+                "lat": _o_m["lat"], "lon": _o_m["lon"], "etiqueta": (_dir_m.strip() or "Dirección"),
+                "info_extra": f"Dirección encontrada: {_o_m['nombre']}\nCoordenada: {_o_m['lat']:.6f}, {_o_m['lon']:.6f}",
+            }
+        if st.session_state.get("error_dir_mapa"):
+            st.error(st.session_state["error_dir_mapa"])
+        consulta_punto = st.session_state.get("resultado_busqueda_punto")
+        if consulta_punto is not None:
+            st.markdown("**Coordenada de esa dirección** (copia con el ícono de la derecha y pégala en el book):")
+            st.code(f"{consulta_punto['lat']:.6f}, {consulta_punto['lon']:.6f}", language=None)
+        st.caption(
+            "📍 Buscando con " + ("Google (misma precisión que Google Maps)." if _usa_google else
+            "OpenStreetMap. Para que busque con Google, configura GOOGLE_MAPS_API_KEY en los Secrets de la app.")
+            + " Antes de usar la coordenada, mira que el punto rojo caiga donde debe en el mapa de abajo."
+        )
 
     else:  # Por coordenada
         col_texto, col_boton = st.columns([5, 1], vertical_alignment="bottom")
@@ -1184,7 +1267,7 @@ with tab_mapa:
                 "Fuente": cercanos["fuente"].values,
                 "Nombre": cercanos["local_identificado"].values,
                 "Responsable": cercanos["especialista"].replace("", "—").values,
-                "Practicante": cercanos["practicante"].replace("", "—").values if "practicante" in cercanos.columns else "—",
+                "Practicante / gestor": persona_asignada(cercanos).values,
                 "Estado": cercanos["estado"].replace("", "Pendiente").values,
                 "Fecha de registro": cercanos["fecha_registro"].replace("", "—").values,
                 "Ciudad": cercanos["ciudad"].replace("", "—").values,
@@ -1213,6 +1296,8 @@ with tab_mapa:
                         "Tienda": tiendas_cerca["nombre"].replace("", "—").values,
                         "Apertura": (tiendas_cerca["apertura"] if "apertura" in tiendas_cerca else tiendas_cerca["nombre"].map(lambda _: "")).replace("", "—").values,
                         "Ciudad": tiendas_cerca["ciudad"].replace("", "—").values,
+                        "Renta último mes": _texto_renta(tiendas_cerca, "renta"),
+                        "Renta prom. 6 meses": _texto_renta(tiendas_cerca, "renta_6m"),
                         "Distancia": [f"{d:.0f} m" for d in tiendas_cerca["distancia_m"]],
                     }),
                     use_container_width=True, hide_index=True,
@@ -1253,64 +1338,7 @@ with tab_mapa:
             st.caption("Columnas de la hoja: " + ", ".join(map(str, _diag_t.get("columnas", []))))
 
 
-# ===== HOJA 2 · Resumen general ============================================
-with tab_resumen:
-    st.markdown("#### Resumen general de puntos potenciales")
-    st.metric("Total de puntos potenciales (todas las fuentes)", len(df))
-    resumen_fuente = (
-        df["fuente"].replace("", "Sin fuente").value_counts()
-        .rename_axis("Fuente").reset_index(name="Cantidad")
-    )
-    st.dataframe(resumen_fuente, hide_index=True, use_container_width=True)
-
-    st.markdown("**Puntos registrados por responsable, en cada fuente**")
-    cols_resumen_fuente = st.columns(2)
-    for i_fuente, (fuente_resumen, color_resumen) in enumerate(FUENTE_COLOR_ICONO.items()):
-        with cols_resumen_fuente[i_fuente % 2]:
-            sub_fuente = df[
-                (df["fuente"] == fuente_resumen) & (df["especialista"].astype(str).str.strip() != "")
-            ]
-            conteo_fuente = (
-                sub_fuente.groupby("especialista").size().reset_index(name="cantidad")
-                .sort_values("cantidad", ascending=False)
-            )
-
-            st.markdown(f"*{fuente_resumen}*")
-            if conteo_fuente.empty:
-                st.caption("Todavía no hay datos para graficar.")
-            else:
-                # Se muestran solo los 5 con más puntos, para que la
-                # gráfica quede compacta — si tiene más, usa el ícono de
-                # pantalla completa que trae la gráfica (arriba a la
-                # derecha, al pasar el mouse) para verla más grande y sin
-                # que los nombres queden cortados.
-                top5_fuente = conteo_fuente.head(5)
-                # Altura mínima generosa (y bastante espacio por barra) para
-                # que con pocas categorías (1 o 2) las barras y sus nombres
-                # no queden amontonados/superpuestos — con "cantidad" como
-                # entero se fuerzan los ticks del eje X a números enteros.
-                chart_fuente = (
-                    alt.Chart(top5_fuente)
-                    .mark_bar(color=_COLORES_HEX_LEYENDA.get(color_resumen, OXXO_ROJO), cornerRadiusEnd=4)
-                    .encode(
-                        x=alt.X("cantidad:Q", title="Puntos", axis=alt.Axis(tickMinStep=1)),
-                        y=alt.Y(
-                            "especialista:N", title=None, sort="-x",
-                            axis=alt.Axis(labelLimit=160),
-                            scale=alt.Scale(paddingInner=0.35, paddingOuter=0.3),
-                        ),
-                        tooltip=[
-                            alt.Tooltip("especialista:N", title="Especialista / responsable"),
-                            alt.Tooltip("cantidad:Q", title="Puntos"),
-                        ],
-                    )
-                    .properties(height=max(120, 42 * len(top5_fuente)))
-                )
-                st.altair_chart(chart_fuente, use_container_width=True)
-                if len(conteo_fuente) > 5:
-                    st.caption(f"Mostrando los 5 con más puntos, de {len(conteo_fuente)} responsables.")
-
-# ===== HOJA 3 · Duplicados =================================================
+# ===== HOJA 4 · Duplicados =================================================
 with tab_dup:
     st.subheader("⚠️ Duplicados")
     # Aviso: puntos que están uno encima del otro en el mismo lugar.
@@ -1347,7 +1375,7 @@ with tab_dup:
                         "Fuente": puntos_grupo["fuente"].values,
                         "Nombre": puntos_grupo["local_identificado"].values,
                         "Responsable": puntos_grupo["especialista"].replace("", "—").values,
-                        "Practicante": puntos_grupo["practicante"].replace("", "—").values if "practicante" in puntos_grupo.columns else "—",
+                        "Practicante / gestor": persona_asignada(puntos_grupo).values,
                         "Estado": puntos_grupo["estado"].replace("", "Pendiente").values,
                         "Fecha de registro": puntos_grupo["fecha_registro"].replace("", "—").values,
                         "Ciudad": puntos_grupo["ciudad"].replace("", "—").values,
@@ -1398,7 +1426,8 @@ with tab_dup:
                     f"Fuente: {f.get('fuente', '') or '—'}"
                     f"\nEspecialista/responsable: {f.get('especialista', '') or '—'}"
                     f"\nCuándo se solicitó: {f.get('fecha_registro', '') or '—'}"
-                    f"\nPracticante: {f.get('practicante', '') or '—'}"
+                    f"\n{'Practicante' if f.get('practicante', '') else 'Gestor asignado'}: "
+                    f"{f.get('practicante', '') or f.get('gestor', '') or '—'}"
                     f"\nEstado: {f.get('estado', '') or '—'}"
                 )
 
@@ -1420,7 +1449,7 @@ with tab_dup:
                 altura=480, mostrar_capas_vacias=False,
             )
 
-# ===== HOJA 4 · Búsqueda de regional y jefes ================================
+# ===== HOJA 2 · Búsqueda de regional y jefes ================================
 with tab_regional:
     st.subheader("🧭 Búsqueda de regional y jefes")
     st.write(
@@ -1514,7 +1543,7 @@ with tab_regional:
             _dir_txt = c_dir.text_input("Dirección", key="dir_regional", placeholder="Ej. Calle 80 # 69-50")
             _ciu_txt = c_ciu.text_input("Ciudad", key="ciudad_regional", placeholder="Ej. Bogotá")
             if c_btn2.button("🔍 Buscar", type="primary", key="buscar_dir_regional", use_container_width=True):
-                _res, _err = _buscar_direccion_cacheado(_dir_txt, _ciu_txt)
+                _res, _err = _buscar_direccion_cacheado(_dir_txt, _ciu_txt, _llave_google())
                 st.session_state["error_regional"] = _err
                 st.session_state["opciones_dir_regional"] = _res
                 st.session_state.pop("busqueda_regional", None)
@@ -1661,6 +1690,244 @@ with tab_regional:
                 "El jefe de zona y el regional salen de las tiendas de alrededor (el Excel asigna jefes "
                 "por tienda, no por territorio dibujado). La zona y el especialista salen del mapa de zonas."
             )
+
+# ===== HOJA 3 · Resumen general ============================================
+# Va después del código de la hoja de regionales porque usa sus zonas y jefes.
+@st.cache_data(show_spinner="Calculando quién tiene cada punto...", ttl=TTL_CACHE_DATOS)
+def _asignaciones_cacheado(puntos: pd.DataFrame, firma: str, _zonas, _tiendas_jefes):
+    """Zona/especialista y jefe de zona de cada punto (la `firma` hace que se recalcule si cambian los archivos)."""
+    return asignar_responsables_a_puntos(puntos, _zonas, _tiendas_jefes)
+
+
+def _barras_horizontales(datos: pd.DataFrame, categoria: str, valor: str, titulo_cat: str, color: str, top: int = 10, sin_asignar_gris: bool = True):
+    """Barras horizontales ordenadas, con el número al final de cada barra. Una sola tonalidad; 'Sin asignar' en gris."""
+    d = datos.head(top).copy()
+    d["_color"] = d[categoria].map(lambda x: "#B8BCC4" if (sin_asignar_gris and str(x) in (SIN_ASIGNAR, "Sin asignar", "Sin dato")) else color)
+    base = alt.Chart(d).encode(
+        y=alt.Y(f"{categoria}:N", title=None, sort="-x", axis=alt.Axis(labelLimit=220),
+                scale=alt.Scale(paddingInner=0.3, paddingOuter=0.2)),
+        x=alt.X(f"{valor}:Q", title=None, axis=alt.Axis(tickMinStep=1, grid=True)),
+        tooltip=[alt.Tooltip(f"{categoria}:N", title=titulo_cat), alt.Tooltip(f"{valor}:Q", title="Puntos")],
+    )
+    barras = base.mark_bar(cornerRadiusEnd=4).encode(color=alt.Color("_color:N", scale=None, legend=None))
+    textos = base.mark_text(align="left", dx=4, color="#1A1A1A").encode(text=f"{valor}:Q")
+    return (barras + textos).properties(height=max(110, 30 * len(d)))
+
+
+def _conteo(serie: pd.Series, nombre: str, vacio: str = "Sin dato") -> pd.DataFrame:
+    s = serie.fillna("").astype(str).str.strip().replace("", vacio)
+    return s.value_counts().rename_axis(nombre).reset_index(name="Puntos")
+
+
+with tab_resumen:
+    st.subheader("📊 Resumen general")
+    st.caption(
+        "Todos los puntos potenciales (Especialistas, Operación, Terceros, Localizadores e Inmobiliaria): "
+        "cuántos hay, de dónde vienen, **qué especialista y qué jefe de zona los tiene** y cómo van en el tiempo."
+    )
+
+    # --- quién tiene cada punto (zona de especialista + jefe de zona de la tienda más cercana) ---
+    _con_coord = df.dropna(subset=["latitud", "longitud"])
+    _firma_asig = f"{len(zonas_especialistas)}|{0 if tiendas_jefes is None else len(tiendas_jefes)}|{_origen_j}|{_origen_z}"
+    if tiendas_jefes is not None and len(_con_coord):
+        _asig = _asignaciones_cacheado(_con_coord[["latitud", "longitud"]], _firma_asig, zonas_especialistas, tiendas_jefes)
+        dfr = df.join(_asig)
+    else:
+        dfr = df.copy()
+    for _c in ("zona", "especialista_zona", "jefe_zona", "regional", "region"):
+        if _c not in dfr.columns:
+            dfr[_c] = SIN_ASIGNAR
+        dfr[_c] = dfr[_c].fillna(SIN_ASIGNAR)
+    if "tienda_ref" not in dfr.columns:
+        dfr["tienda_ref"], dfr["dist_tienda_m"] = "", float("nan")
+    dfr["fuente"] = dfr["fuente"].replace("", "Sin fuente")
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Puntos potenciales", f"{len(df):,}".replace(",", "."))
+    m2.metric("Con coordenada", f"{len(_con_coord):,}".replace(",", "."))
+    m3.metric("Dentro de una zona de especialista", f"{int((dfr['especialista_zona'] != SIN_ASIGNAR).sum()):,}".replace(",", "."))
+    m4.metric("Con jefe de zona asignado", f"{int((dfr['jefe_zona'] != SIN_ASIGNAR).sum()):,}".replace(",", "."))
+    if tiendas_jefes is None:
+        st.info(
+            "Todavía no están cargadas las tiendas con jefes, por eso no puedo decir qué jefe de zona tiene cada punto. "
+            "Cuando se carguen, aquí aparecen los especialistas y jefes.",
+            icon="ℹ️",
+        )
+
+    # ---------------- 1. De dónde vienen ----------------
+    st.markdown("### 1. ¿De dónde vienen los puntos?")
+    g1, g2 = st.columns(2)
+    with g1:
+        st.markdown("**Por fuente**")
+        por_fuente = _conteo(dfr["fuente"], "Fuente")
+        st.altair_chart(
+            alt.Chart(por_fuente).mark_bar(cornerRadiusEnd=4).encode(
+                y=alt.Y("Fuente:N", sort="-x", title=None, scale=alt.Scale(paddingInner=0.3)),
+                x=alt.X("Puntos:Q", title=None, axis=alt.Axis(tickMinStep=1)),
+                color=alt.Color("Fuente:N", legend=None, scale=alt.Scale(
+                    domain=[f for f in por_fuente["Fuente"]],
+                    range=[_COLORES_HEX_LEYENDA.get(FUENTE_COLOR_ICONO.get(f, ""), "#7F8C8D") for f in por_fuente["Fuente"]],
+                )),
+                tooltip=["Fuente", "Puntos"],
+            ).properties(height=max(110, 34 * len(por_fuente))) +
+            alt.Chart(por_fuente).mark_text(align="left", dx=4, color="#1A1A1A").encode(
+                y=alt.Y("Fuente:N", sort="-x"), x="Puntos:Q", text="Puntos:Q"),
+            use_container_width=True,
+        )
+    with g2:
+        st.markdown("**Por estado**")
+        por_estado = _conteo(dfr["estado"], "Estado", "Pendiente")
+        st.altair_chart(_barras_horizontales(por_estado, "Estado", "Puntos", "Estado", OXXO_ROJO, top=8, sin_asignar_gris=False), use_container_width=True)
+    st.markdown("**Ciudades con más puntos**")
+    st.altair_chart(
+        _barras_horizontales(_conteo(dfr["ciudad"], "Ciudad"), "Ciudad", "Puntos", "Ciudad", "#1D4ED8", top=10),
+        use_container_width=True,
+    )
+
+    # ---------------- 2. Quién los tiene ----------------
+    st.markdown("### 2. ¿Qué especialista y qué jefe de zona tiene cada punto?")
+    st.caption(
+        "**Especialista:** el de la zona dibujada en el mapa de especialistas donde cae el punto. "
+        "**Jefe de zona y regional:** los de la tienda OXXO más cercana (a menos de 5 km) que tiene jefe asignado."
+    )
+    q1, q2 = st.columns(2)
+    with q1:
+        st.markdown("**Puntos por especialista (zona)**")
+        st.altair_chart(
+            _barras_horizontales(_conteo(dfr["especialista_zona"], "Especialista"), "Especialista", "Puntos", "Especialista de la zona", "#7C3AA8", top=12),
+            use_container_width=True,
+        )
+    with q2:
+        st.markdown("**Puntos por jefe de zona**")
+        st.altair_chart(
+            _barras_horizontales(_conteo(dfr["jefe_zona"], "Jefe de zona"), "Jefe de zona", "Puntos", "Jefe de zona", "#16A34A", top=12),
+            use_container_width=True,
+        )
+    st.markdown("**Puntos por regional**")
+    st.altair_chart(
+        _barras_horizontales(_conteo(dfr["regional"], "Regional"), "Regional", "Puntos", "Regional", "#0891B2", top=10),
+        use_container_width=True,
+    )
+    st.caption(
+        "Las barras en gris son puntos que no cayeron en ninguna zona dibujada o que están a más de 5 km de una tienda con jefe."
+    )
+
+    # Cruce especialista x jefe de zona (solo los que tienen ambos)
+    _cruce = dfr[(dfr["especialista_zona"] != SIN_ASIGNAR) & (dfr["jefe_zona"] != SIN_ASIGNAR)]
+    if not _cruce.empty:
+        st.markdown("**¿Qué jefe de zona acompaña a cada especialista?** (cuántos puntos comparten)")
+        _hm = _cruce.groupby(["especialista_zona", "jefe_zona"]).size().reset_index(name="Puntos")
+        st.altair_chart(
+            alt.Chart(_hm).mark_rect(cornerRadius=3).encode(
+                x=alt.X("jefe_zona:N", title="Jefe de zona", axis=alt.Axis(labelAngle=-40, labelLimit=140)),
+                y=alt.Y("especialista_zona:N", title=None, axis=alt.Axis(labelLimit=200)),
+                color=alt.Color("Puntos:Q", scale=alt.Scale(range=["#FDE2E4", OXXO_ROJO]), legend=alt.Legend(title="Puntos")),
+                tooltip=[alt.Tooltip("especialista_zona:N", title="Especialista"), alt.Tooltip("jefe_zona:N", title="Jefe de zona"), "Puntos:Q"],
+            ).properties(height=max(160, 28 * _hm["especialista_zona"].nunique())),
+            use_container_width=True,
+        )
+
+    # ---------------- 3. Quién los registró ----------------
+    st.markdown("### 3. ¿Quién registró los puntos?")
+    st.markdown("**Por responsable, en cada fuente** (los 5 con más puntos)")
+    cols_resumen_fuente = st.columns(2)
+    for i_fuente, (fuente_resumen, color_resumen) in enumerate(FUENTE_COLOR_ICONO.items()):
+        with cols_resumen_fuente[i_fuente % 2]:
+            sub_fuente = df[(df["fuente"] == fuente_resumen) & (df["especialista"].astype(str).str.strip() != "")]
+            conteo_fuente = (
+                sub_fuente.groupby("especialista").size().reset_index(name="cantidad").sort_values("cantidad", ascending=False)
+            )
+            st.markdown(f"*{fuente_resumen}*")
+            if conteo_fuente.empty:
+                st.caption("Todavía no hay datos para graficar.")
+            else:
+                st.altair_chart(
+                    _barras_horizontales(
+                        conteo_fuente.rename(columns={"especialista": "Responsable", "cantidad": "Puntos"}),
+                        "Responsable", "Puntos", "Responsable", _COLORES_HEX_LEYENDA.get(color_resumen, OXXO_ROJO), top=5,
+                    ),
+                    use_container_width=True,
+                )
+                if len(conteo_fuente) > 5:
+                    st.caption(f"Mostrando los 5 con más puntos, de {len(conteo_fuente)} responsables.")
+
+    st.markdown("**Por practicante** (los practicantes son Laura, Isabela, Elanie, Alisson y Juan Pablo)")
+    _prac = dfr["practicante"].fillna("").astype(str).str.strip() if "practicante" in dfr.columns else pd.Series([], dtype=str)
+    _prac = _prac[_prac != ""]
+    if _prac.empty:
+        st.caption("Todavía no hay puntos con practicante asignado.")
+    else:
+        st.altair_chart(
+            _barras_horizontales(_conteo(_prac, "Practicante"), "Practicante", "Puntos", "Practicante", OXXO_ROJO, top=10),
+            use_container_width=True,
+        )
+    if "gestor" in dfr.columns and (dfr["gestor"].fillna("").astype(str).str.strip() != "").any():
+        st.markdown("**Por gestor asignado** (personas que no son practicantes, como la localizadora)")
+        st.altair_chart(
+            _barras_horizontales(
+                _conteo(dfr.loc[dfr["gestor"].fillna("").astype(str).str.strip() != "", "gestor"], "Gestor"),
+                "Gestor", "Puntos", "Gestor", "#E67E22", top=10,
+            ),
+            use_container_width=True,
+        )
+
+    # ---------------- 4. En el tiempo ----------------
+    st.markdown("### 4. ¿Cómo van en el tiempo?")
+    _fechas = pd.to_datetime(dfr["fecha_registro"], errors="coerce")
+    _tiempo = dfr.assign(_mes=_fechas.dt.to_period("M").dt.to_timestamp()).dropna(subset=["_mes"])
+    if _tiempo.empty:
+        st.caption("Los puntos todavía no tienen fecha de registro.")
+    else:
+        _por_mes = _tiempo.groupby(["_mes", "fuente"]).size().reset_index(name="Puntos")
+        st.altair_chart(
+            alt.Chart(_por_mes).mark_bar().encode(
+                x=alt.X("_mes:T", title=None, axis=alt.Axis(format="%b %Y", labelAngle=-40)),
+                y=alt.Y("Puntos:Q", title="Puntos registrados"),
+                color=alt.Color("fuente:N", title="Fuente", scale=alt.Scale(
+                    domain=list(FUENTE_COLOR_ICONO.keys()) + ["Sin fuente"],
+                    range=[_COLORES_HEX_LEYENDA.get(c, "#7F8C8D") for c in FUENTE_COLOR_ICONO.values()] + ["#7F8C8D"],
+                )),
+                tooltip=[alt.Tooltip("_mes:T", title="Mes", format="%b %Y"), alt.Tooltip("fuente:N", title="Fuente"), "Puntos:Q"],
+            ).properties(height=280),
+            use_container_width=True,
+        )
+
+    # ---------------- 5. Detalle ----------------
+    st.markdown("### 5. Detalle: quién tiene cada punto")
+    f1, f2, f3, f4 = st.columns(4)
+    _f_fuente = f1.multiselect("Fuente", sorted(dfr["fuente"].unique()), key="res_f_fuente")
+    _f_esp = f2.multiselect("Especialista (zona)", sorted(dfr["especialista_zona"].unique()), key="res_f_esp")
+    _f_jefe = f3.multiselect("Jefe de zona", sorted(dfr["jefe_zona"].unique()), key="res_f_jefe")
+    _f_ciudad = f4.multiselect("Ciudad", sorted({c for c in dfr["ciudad"].fillna("").astype(str) if c.strip()}), key="res_f_ciudad")
+    _sel = dfr
+    if _f_fuente:
+        _sel = _sel[_sel["fuente"].isin(_f_fuente)]
+    if _f_esp:
+        _sel = _sel[_sel["especialista_zona"].isin(_f_esp)]
+    if _f_jefe:
+        _sel = _sel[_sel["jefe_zona"].isin(_f_jefe)]
+    if _f_ciudad:
+        _sel = _sel[_sel["ciudad"].isin(_f_ciudad)]
+    _tabla = pd.DataFrame({
+        "Punto": _sel["local_identificado"].values,
+        "Fuente": _sel["fuente"].values,
+        "Ciudad": _sel["ciudad"].replace("", "—").values,
+        "Estado": _sel["estado"].replace("", "Pendiente").values,
+        "Zona (UPZ)": _sel["zona"].values,
+        "Especialista (zona)": _sel["especialista_zona"].values,
+        "Jefe de zona": _sel["jefe_zona"].values,
+        "Regional": _sel["regional"].values,
+        "Registró": _sel["especialista"].replace("", "—").values,
+        "Practicante / gestor": persona_asignada(_sel).values,
+        "Fecha de registro": _sel["fecha_registro"].astype(str).replace({"NaT": "—", "None": "—", "nan": "—"}).values,
+    })
+    st.caption(f"{len(_tabla)} punto(s).")
+    st.dataframe(_tabla, use_container_width=True, hide_index=True)
+    st.download_button(
+        "⬇️ Descargar esta tabla (CSV)", _tabla.to_csv(index=False).encode("utf-8-sig"),
+        file_name="puntos_con_especialista_y_jefe.csv", mime="text/csv", key="descargar_resumen",
+    )
+
 
 st.divider()
 st.caption(
